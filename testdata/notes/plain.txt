@@ -1,0 +1,2 @@
+A plain text file. Clicking its link in 05-links.md should open it in your default text editor, not
+in mmd.

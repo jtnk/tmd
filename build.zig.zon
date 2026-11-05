@@ -1,0 +1,13 @@
+.{
+    .name = .tmd,
+    .version = "0.1.0",
+    .fingerprint = 0x3635a93574d00b12,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/refs/tags/v1.4.0.tar.gz",
+            .hash = "ghostty-1.4.0-5UdBC-qohwWqLS0BImOz05t4hVyTwbaKslyTPvKYvAtE",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "vendor", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md" },
+}

@@ -1,0 +1,9 @@
+zig-out/
+.zig-cache/
+.DS_Store
+testdata/perf/large.md
+testdata/perf/huge.md
+zig-pkg/
+perf/reports/
+perf/baseline.json
+__pycache__/
