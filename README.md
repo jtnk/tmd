@@ -2,6 +2,8 @@
 
 A tiny, fast Markdown viewer for the terminal.
 
+![tmd showing its quickstart page in a terminal](docs/demo.gif)
+
 ```sh
 tmd notes.md
 ```
