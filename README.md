@@ -1,7 +1,6 @@
 ![tmd: Markdown, rendered in your terminal](testdata/images/hero.svg)
 
-A tiny, fast Markdown viewer for the terminal. One static binary of about 500KB, with no
-runtime dependencies, and real images and large headings in terminals that can show them.
+A tiny, fast Markdown viewer for the terminal.
 
 ```sh
 tmd notes.md
