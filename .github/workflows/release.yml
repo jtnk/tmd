@@ -1,0 +1,65 @@
+name: Release
+
+# Pushing a tag publishes that version. Running this by hand publishes a tag that already exists.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish, such as v0.2.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+
+      - name: Test
+        run: zig build test
+
+      - name: Build
+        run: |
+          # Zig cross-compiles, so one runner builds them all. musl makes the Linux builds static.
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            zig build --release=small -Dtarget="$target" -Dversion="${TAG#v}" --prefix "out/$target"
+          done
+
+      - name: Check the binary this runner can run
+        run: |
+          out/x86_64-linux-musl/bin/tmd --version | grep -Fx "tmd ${TAG#v}"
+          out/x86_64-linux-musl/bin/tmd -p README.md | grep -q "Markdown"
+
+      - name: Package
+        run: |
+          # The third-party licenses have to travel with the binaries.
+          mkdir dist
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            cp LICENSE THIRD_PARTY_NOTICES.md "out/$target/bin/"
+            tar -czf "dist/tmd-${target%-musl}.tar.gz" -C "out/$target/bin" tmd LICENSE THIRD_PARTY_NOTICES.md
+          done
+          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --generate-notes
+          fi
