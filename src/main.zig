@@ -170,6 +170,7 @@ fn run(init: std.process.Init.Minimal) !void {
     app.store.tmux = caps.tmux;
     app.store.big_headings = settings.big_headings;
     app.store.font_path = settings.heading_font;
+    if (caps.double_height and settings.big_headings) app.useTallHeadings();
     if (caps.rex) {
         app.store.points = true;
         app.store.budget = 8 * 1024 * 1024;

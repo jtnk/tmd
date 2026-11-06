@@ -19,6 +19,10 @@ pub const Span = struct {
 /// How a row continues the one above it: a new line, or a wrap that took out a space or nothing.
 pub const Join = enum(u8) { none, space, tight };
 
+/// The halves of a double-height line. Its text belongs to the top row alone, so that finding and
+/// copying see it once, and the bottom row draws the row before it.
+pub const Tall = enum(u8) { none, top, bottom };
+
 pub const Row = struct {
     first: u32,
     count: u32 = 0,
@@ -34,6 +38,7 @@ pub const Row = struct {
     /// Cells at the start that only decorate the row: quote bars, indents, code padding.
     lead: u16 = 0,
     join: Join = .none,
+    tall: Tall = .none,
 };
 
 /// text is set when the heading is drawn as an image, so find can still reach it.
@@ -60,6 +65,8 @@ pub const Options = struct {
     images: ?Images = null,
     /// Mark links that leave tmd with an arrow, for when they can be followed.
     link_marks: bool = false,
+    /// Draw h1 and h2 as double-height lines, when they can't be images.
+    tall_headings: bool = false,
 };
 
 pub const Layout = struct {
@@ -692,6 +699,13 @@ const Builder = struct {
             self.need_gap = true;
             return;
         }
+        // A line's size applies to all of it, so a heading in a quote or a list would take its bar or
+        // its marker with it.
+        if (level <= 2 and self.opts.tall_headings and ctx.parent == null) {
+            try self.tallHeading(ctx, src);
+            self.need_gap = true;
+            return;
+        }
         try self.wrap(ctx, src, ctx.width);
         if (level <= 2) {
             try self.begin(ctx, src);
@@ -700,6 +714,32 @@ const Builder = struct {
             try self.finish();
         }
         self.need_gap = true;
+    }
+
+    /// Wraps the heading at the half width its cells have, then gives each row a bottom half.
+    fn tallHeading(self: *Builder, ctx: *Ctx, src: u32) !void {
+        const rows = &self.out.rows;
+        const first = rows.items.len;
+        const links = self.out.links.items.len - self.linksOfPieces();
+        try self.wrap(ctx, src, @max((ctx.width -| 1) / 2, 1));
+        const n = rows.items.len - first;
+        try rows.resize(self.gpa, first + n * 2);
+        var i = n;
+        while (i > 0) {
+            i -= 1;
+            var top = rows.items[first + i];
+            top.tall = .top;
+            rows.items[first + i * 2] = top;
+            rows.items[first + i * 2 + 1] = .{ .first = top.first + top.count, .src = src, .join = .tight, .tall = .bottom };
+        }
+        for (self.out.links.items[links..]) |*l| {
+            if (l.row != no_row) l.row = @intCast(first + (l.row - first) * 2);
+        }
+    }
+
+    /// How many of the document's links are the current pieces'.
+    fn linksOfPieces(self: *Builder) usize {
+        return if (self.current != 0) self.out.memo.inlines.items[self.current - 1].urls.len else self.urls.items.len;
     }
 
     /// Draws the heading in pixels, as tall as a few rows, one image per wrapped line. Returns false
@@ -1718,11 +1758,11 @@ test "laying the same text out again matches starting over" {
     const widths = [_]u16{ 40, 40, 12, 80, 29, 31, 8, 200, 29 };
     var token: u8 = 0;
     const images = Images{ .ctx = &token, .fit = FussyImages.fit, .measure = FussyImages.measure, .heading = FussyImages.heading };
-    for (docs) |doc| for ([_]?Images{ null, images }) |im| for ([_]bool{ false, true }) |marks| {
-        var l = try layout(testing.allocator, doc, .{ .width = 40, .images = im, .link_marks = marks });
+    for (docs) |doc| for ([_]?Images{ null, images }) |im| for ([_]bool{ false, true }) |marks| for ([_]bool{ false, true }) |tall| {
+        var l = try layout(testing.allocator, doc, .{ .width = 40, .images = im, .link_marks = marks, .tall_headings = tall });
         defer l.deinit();
         for (widths) |w| {
-            const opts = Options{ .width = w, .images = im, .link_marks = marks };
+            const opts = Options{ .width = w, .images = im, .link_marks = marks, .tall_headings = tall };
             try relayout(&l, doc, opts, true);
             var fresh = try layout(testing.allocator, doc, opts);
             defer fresh.deinit();
@@ -1750,6 +1790,33 @@ test "laying out changed text forgets the old" {
     var marked = try layout(testing.allocator, &buf, .{ .width = 30, .link_marks = true });
     defer marked.deinit();
     try expectSameLayout(&marked, &l);
+}
+
+test "tall headings are two rows, with the text only in the first" {
+    var l = try layout(testing.allocator, "intro [a](a.md)\n\n# One [two](b.md) three four\n\nafter [c](c.md)\n", .{ .width = 24, .tall_headings = true });
+    defer l.deinit();
+    const rows = l.rows.items;
+    // Intro, gap, then at half of the width the heading takes two lines of two rows each.
+    try testing.expectEqual(Tall.top, rows[2].tall);
+    try testing.expectEqual(Tall.bottom, rows[3].tall);
+    try testing.expectEqual(Tall.top, rows[4].tall);
+    try testing.expectEqual(Tall.bottom, rows[5].tall);
+    try testing.expectEqual(Tall.none, rows[6].tall);
+    try testing.expectEqual(@as(u32, 0), rows[3].count);
+    try testing.expectEqual(@as(u32, 0), rows[5].count);
+    try testing.expectEqual(Join.tight, rows[3].join);
+    try testing.expectEqual(Join.space, rows[4].join);
+    // No rule under it, and a link keeps pointing at the row that shows it.
+    try testing.expectEqual(@as(u32, 2), l.headings.items[0].row);
+    try testing.expectEqual(@as(u32, 0), l.links.items[0].row);
+    try testing.expectEqual(@as(u32, 2), l.links.items[1].row);
+    try testing.expectEqual(@as(u32, 7), l.links.items[2].row);
+}
+
+test "a heading in a quote or a list stays one line" {
+    var l = try layout(testing.allocator, "> # In a quote\n\n- # In a list\n", .{ .width = 40, .tall_headings = true });
+    defer l.deinit();
+    for (l.rows.items) |r| try testing.expectEqual(Tall.none, r.tall);
 }
 
 test "paragraphs wrap and symbols disappear" {

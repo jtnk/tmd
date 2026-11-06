@@ -8,6 +8,7 @@ const input = @import("input.zig");
 const md = @import("layout").md;
 const width = @import("layout").width;
 const files = @import("layout").files;
+const selection = @import("selection.zig");
 const App = app_mod.App;
 const testing = std.testing;
 const gpa = testing.allocator;
@@ -57,9 +58,19 @@ const Rig = struct {
         gpa.destroy(r);
     }
 
+    /// Ghostty has no double-height lines, and warns about each one.
+    fn feed(r: *Rig, bytes: []const u8) void {
+        var rest = bytes;
+        while (std.mem.indexOf(u8, rest, "\x1b#")) |i| {
+            r.stream.nextSlice(rest[0..i]);
+            rest = rest[i + 3 ..];
+        }
+        r.stream.nextSlice(rest);
+    }
+
     fn pump(r: *Rig) !void {
         try r.app.frame();
-        r.stream.nextSlice(r.app.out.items);
+        r.feed(r.app.out.items);
         r.app.out.clearRetainingCapacity();
     }
 
@@ -82,6 +93,12 @@ const Rig = struct {
             std.debug.print("\nscreen lacks \"{s}\":\n{s}\n", .{ s, text });
             return error.TestExpectedEqual;
         }
+    }
+
+    fn expectShowsAfterPump(r: *Rig, s: []const u8) !void {
+        r.stream.nextSlice(r.app.out.items);
+        r.app.out.clearRetainingCapacity();
+        return r.expectShows(s);
     }
 
     fn expectHides(r: *Rig, s: []const u8) !void {
@@ -209,6 +226,73 @@ test "scrolling in the editor sends a row, and ends up identical to a full repai
         try r.keys(k);
         try check.same(r);
     }
+}
+
+test "a double-height heading is found once, copies once, and its link and text can be clicked" {
+    var r = try Rig.create(60, 14);
+    defer r.destroy();
+    r.app.useTallHeadings();
+    _ = try r.app.openText("doc", "intro\n\n# Go [there](next.md) now\n\nlater text\n", false);
+    try r.pump();
+    const l = &r.app.tab().layout.?;
+    try testing.expectEqual(md.Tall.top, l.rows.items[2].tall);
+    try testing.expectEqual(md.Tall.bottom, l.rows.items[3].tall);
+
+    // Both halves are sent with their sizes, and everything else as plain lines.
+    r.app.screen.invalidate();
+    try r.app.frame();
+    const sent = r.app.out.items;
+    try testing.expect(std.mem.indexOf(u8, sent, "\x1b[3;1H\x1b#3") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\x1b[4;1H\x1b#4") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\x1b[1;1H\x1b#5") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\x1b[5;1H\x1b#5") != null);
+    r.feed(sent);
+    r.app.out.clearRetainingCapacity();
+
+    try r.keys("/Go\r");
+    try testing.expectEqual(@as(usize, 1), r.app.match_rows.items.len);
+    try testing.expectEqual(@as(u32, 2), r.app.match_rows.items[0]);
+
+    // Cells are two columns wide. "Go " is three, so the link starts at the tall margin plus three.
+    const margin = r.app.tallMargin();
+    const word_x = (margin + 4) * 2;
+    for ([_]u32{ 2, 3 }) |y| {
+        const at = r.app.pointAt(r.app.tab(), .{ .x = @intCast(word_x), .y = @intCast(y), .button = .left, .press = true, .motion = false, .mods = .{} });
+        try testing.expectEqual(@as(u32, 2), at.row);
+        try testing.expectEqual(@as(u32, 4), at.col);
+    }
+
+    var sel = selection.Selection{ .anchor = .{ .row = 2, .col = 0 }, .head = .{ .row = 3, .col = 200 } };
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    try sel.text(gpa, l, &text);
+    try testing.expectEqualStrings("Go there now", text.items);
+    sel = .{ .anchor = .{ .row = 0, .col = 0 }, .head = .{ .row = 6, .col = 200 } };
+    text.clearRetainingCapacity();
+    try sel.text(gpa, l, &text);
+    try testing.expectEqualStrings("intro\n\nGo there now\n\nlater text", text.items);
+}
+
+test "double-height headings survive windows too small for them" {
+    for ([_]u16{ 1, 2, 3, 4, 5, 9, 13 }) |cols| for ([_]u16{ 1, 2, 3, 7 }) |rows| {
+        var r = try Rig.create(cols, rows);
+        defer r.destroy();
+        r.app.useTallHeadings();
+        _ = try r.app.openText("doc", "# A heading [with a link](a.md)\n\ntext\n\n## Another one\n\nmore\n\n# Last\n", false);
+        try r.pump();
+        try r.keys("jjjGkkg");
+        try r.app.resize(cols + 1, rows + 1);
+        try r.pump();
+    };
+}
+
+test "a terminal without double-height lines is sent none of it" {
+    var r = try Rig.create(60, 14);
+    defer r.destroy();
+    _ = try r.app.openText("doc", "# Title\n\ntext\n", false);
+    try r.app.frame();
+    try testing.expect(std.mem.indexOf(u8, r.app.out.items, "\x1b#") == null);
+    try r.expectShowsAfterPump("Title");
 }
 
 test "layout agrees with the terminal about the width of every row" {

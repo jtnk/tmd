@@ -4,6 +4,7 @@
 const std = @import("std");
 const theme = @import("layout").theme;
 const width = @import("layout").width;
+const Tall = @import("layout").md.Tall;
 const Style = theme.Style;
 
 pub const Cursor = struct { x: u16, y: u16 };
@@ -18,6 +19,9 @@ pub const Screen = struct {
     starts: []u32 = &.{},
     cur: []u64 = &.{},
     prev: []u64 = &.{},
+    /// Each row's line size, which is only sent to terminals that have them.
+    double_height: bool = false,
+    sizes: []Tall = &.{},
     // The row being built.
     y: u16 = 0,
     col: u16 = 0,
@@ -31,6 +35,7 @@ pub const Screen = struct {
         self.gpa.free(self.starts);
         self.gpa.free(self.cur);
         self.gpa.free(self.prev);
+        self.gpa.free(self.sizes);
     }
 
     pub fn resize(self: *Screen, cols: u16, rows: u16) !void {
@@ -39,6 +44,7 @@ pub const Screen = struct {
         self.starts = try self.gpa.realloc(self.starts, @as(usize, rows) + 1);
         self.cur = try self.gpa.realloc(self.cur, rows);
         self.prev = try self.gpa.realloc(self.prev, rows);
+        self.sizes = try self.gpa.realloc(self.sizes, rows);
         self.invalidate();
     }
 
@@ -58,6 +64,18 @@ pub const Screen = struct {
         self.col = 0;
         self.limit = @min(limit, self.cols);
         self.style = null;
+        self.sizes[self.y] = .none;
+    }
+
+    /// Makes the row being built half of a double-height line, whose cells are two columns wide.
+    pub fn tall(self: *Screen, half: Tall) void {
+        self.sizes[self.y] = half;
+        self.limit /= 2;
+    }
+
+    /// How many cells fit across the row being built.
+    pub fn rowCells(self: *const Screen) u16 {
+        return if (self.sizes[self.y] == .none) self.cols else self.cols / 2;
     }
 
     pub fn setStyle(self: *Screen, s: Style) !void {
@@ -120,7 +138,7 @@ pub const Screen = struct {
 
     /// Clears the rest of the row in style s and finishes it.
     pub fn endRow(self: *Screen, s: Style) !void {
-        if (self.col < self.cols and self.th.color) {
+        if (self.col < self.rowCells() and self.th.color) {
             try self.setStyle(s);
             try self.bytes.appendSlice(self.gpa, "\x1b[K");
         }
@@ -130,7 +148,7 @@ pub const Screen = struct {
     pub fn end(self: *Screen) void {
         self.starts[self.y] = @intCast(self.bytes.items.len);
         for (0..self.y) |i| {
-            const h = std.hash.Wyhash.hash(0, self.bytes.items[self.starts[i]..self.starts[i + 1]]);
+            const h = std.hash.Wyhash.hash(@intFromEnum(self.sizes[i]), self.bytes.items[self.starts[i]..self.starts[i + 1]]);
             self.cur[i] = h | 1; // 0 means unknown
         }
     }
@@ -184,6 +202,11 @@ pub const Screen = struct {
             while (y < self.y) : (y += 1) {
                 if (self.prev[y] == self.cur[y]) continue;
                 try out.appendSlice(g, try std.fmt.bufPrint(&buf, "\x1b[{d};1H", .{y + 1}));
+                if (self.double_height) try out.appendSlice(g, switch (self.sizes[y]) {
+                    .none => "\x1b#5",
+                    .top => "\x1b#3",
+                    .bottom => "\x1b#4",
+                });
                 try out.appendSlice(g, self.bytes.items[self.starts[y]..self.starts[y + 1]]);
                 self.sent_rows += 1;
             }

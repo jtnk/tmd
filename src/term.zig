@@ -14,6 +14,8 @@ pub const Caps = struct {
     tmux: bool = false,
     /// Rex: it holds at most 10MB of images per block.
     rex: bool = false,
+    /// Lines can be double height, which is as near as a terminal without graphics gets to large type.
+    double_height: bool = false,
 };
 
 const enter_seq =
@@ -104,6 +106,9 @@ pub fn probe(gpa: std.mem.Allocator) !Caps {
     const version = "\x1b[>q";
     var q: std.ArrayList(u8) = .empty;
     defer q.deinit(gpa);
+    // A terminal can print what it doesn't understand, as Apple's prints two of these. All of it goes
+    // out at once, so wiping it at the end means it never shows, and can't be left behind on exit.
+    try q.appendSlice(gpa, "\x1b7");
     if (caps.tmux) {
         // tmux answers XTVERSION itself and swallows graphics, so ask the terminal behind it.
         try q.appendSlice(gpa, "\x1bPtmux;\x1b\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\");
@@ -113,6 +118,7 @@ pub fn probe(gpa: std.mem.Allocator) !Caps {
         try q.appendSlice(gpa, version);
     }
     try q.appendSlice(gpa, "\x1b[?2027$p\x1b[?u\x1b]11;?\x1b\\\x1b[16t\x1b[c");
+    try q.appendSlice(gpa, "\x1b8\x1b[J");
     writeRaw(q.items);
 
     var graphics_ok = false;
@@ -169,6 +175,7 @@ pub fn probe(gpa: std.mem.Allocator) !Caps {
         // tmux can only carry placeholders, since it owns the grid.
         caps.images = if (placeholders) .placeholder else if (caps.tmux) .off else .direct;
     }
+    caps.double_height = envIs("TERM_PROGRAM", "Apple_Terminal") and !caps.tmux;
     if (c.getenv("TMD_IMAGES")) |v| {
         const s = std.mem.span(v);
         if (std.mem.eql(u8, s, "off")) caps.images = .off;

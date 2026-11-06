@@ -130,8 +130,15 @@ pub const App = struct {
     cause: trace.Cause = .none,
     /// The next frame only refreshes the HUD, and isn't one to count.
     hud_tick: bool = false,
+    tall_headings: bool = false,
     /// Where the left button went down in the preview, until it comes up.
     drag_from: ?selection.Point = null,
+
+    /// Draw large headings as double-height lines, for a terminal that has those and not images.
+    pub fn useTallHeadings(self: *App) void {
+        self.tall_headings = true;
+        self.screen.double_height = true;
+    }
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{ .gpa = gpa, .screen = .{ .gpa = gpa }, .store = .{ .gpa = gpa } };
@@ -260,6 +267,11 @@ pub const App = struct {
         return @max((self.screen.cols -| self.textWidth()) / 2, 1);
     }
 
+    /// The left margin of a double-height line, in its double-width cells.
+    pub fn tallMargin(self: *const App) u16 {
+        return (self.leftMargin() + 1) / 2;
+    }
+
     fn viewRows(self: *const App) u16 {
         return self.screen.rows -| (1 + self.barRows() + self.hudRows() + 2 * self.frameRows());
     }
@@ -300,6 +312,7 @@ pub const App = struct {
             .max_image_rows = max_rows,
             .images = if (self.store.mode != .off) self.store.source() else null,
             .link_marks = true,
+            .tall_headings = self.tall_headings,
         };
         if (t.layout) |*l| {
             md.relayout(l, t.ed.text(), opts, !text_changed) catch |e| {
@@ -1141,14 +1154,19 @@ pub const App = struct {
     }
 
     /// The cell under the mouse, in layout rows. Past either end of the view, a drag scrolls.
-    fn pointAt(self: *App, t: *Tab, m: input.Mouse) selection.Point {
+    pub fn pointAt(self: *App, t: *Tab, m: input.Mouse) selection.Point {
         const bar = self.barRows();
         const view = self.viewRows();
         if (m.y < bar) self.scrollBy(t, -1);
         if (m.y >= bar + view) self.scrollBy(t, 1);
         const y = @min(m.y -| bar, view -| 1);
-        const last: u32 = @intCast(t.layout.?.rows.items.len -| 1);
-        return .{ .row = @min(t.top + y, last), .col = m.x -| self.leftMargin() };
+        const l = &t.layout.?;
+        const row = @min(t.top + y, @as(u32, @intCast(l.rows.items.len -| 1)));
+        return switch (l.rows.items[row].tall) {
+            .none => .{ .row = row, .col = m.x -| self.leftMargin() },
+            .top => .{ .row = row, .col = m.x / 2 -| self.tallMargin() },
+            .bottom => .{ .row = row - 1, .col = m.x / 2 -| self.tallMargin() },
+        };
     }
 
     fn previewDrag(self: *App, t: *Tab, m: input.Mouse) !void {
@@ -1177,11 +1195,14 @@ pub const App = struct {
         const bar = self.barRows();
         if (m.y < bar or m.y >= bar + self.viewRows()) return;
         const l = &t.layout.?;
-        const row = t.top + m.y - bar;
+        var row = t.top + m.y - bar;
         if (row >= l.rows.items.len) return;
-        var col: u32 = self.leftMargin();
+        const size = l.rows.items[row].tall;
+        if (size == .bottom) row -= 1;
+        var col: u32 = if (size == .none) self.leftMargin() else self.tallMargin();
+        const x = if (size == .none) m.x else m.x / 2;
         for (l.rowSpans(l.rows.items[row])) |s| {
-            if (m.x >= col and m.x < col + s.width) {
+            if (x >= col and x < col + s.width) {
                 if (s.link != 0) {
                     t.focus = s.link;
                     clearFocus(t);
@@ -1338,13 +1359,20 @@ pub const App = struct {
             const idx = t.top + y;
             if (idx < total) {
                 const r = l.rows.items[idx];
-                try sc.padTo(base, x0);
-                try self.paintRow(t, l, r, idx, base);
-                if (r.image != 0) try self.paintImageRow(r);
-                if (!(r.fill.kind == .role and r.fill.value == 0)) {
-                    var st = base;
-                    st.bg = r.fill;
-                    try sc.padTo(st, x0 + self.textWidth());
+                if (r.tall != .none) {
+                    sc.tall(r.tall);
+                    try sc.padTo(base, self.tallMargin());
+                    const text = if (r.tall == .bottom) idx - 1 else idx;
+                    try self.paintRow(t, l, l.rows.items[text], text, base);
+                } else {
+                    try sc.padTo(base, x0);
+                    try self.paintRow(t, l, r, idx, base);
+                    if (r.image != 0) try self.paintImageRow(r);
+                    if (!(r.fill.kind == .role and r.fill.value == 0)) {
+                        var st = base;
+                        st.bg = r.fill;
+                        try sc.padTo(st, x0 + self.textWidth());
+                    }
                 }
             }
             try self.rowEnd(base, y, view, total, t.top);
@@ -1441,8 +1469,8 @@ pub const App = struct {
             const thumb = @max(view * view / total, 1);
             const span = view - thumb;
             const pos = @as(u64, top) * span / @max(total - view, 1);
-            sc.limit = sc.cols;
-            try sc.padTo(base, sc.cols - 1);
+            sc.limit = sc.rowCells();
+            try sc.padTo(base, sc.limit -| 1);
             var st = base;
             st.fg = Color.role(.dim);
             try sc.text(st, if (y >= pos and y < pos + thumb) "┃" else " ");

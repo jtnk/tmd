@@ -55,7 +55,8 @@ butter.
 ```
 
 That's the plain version for pipes. In a terminal you get color, a scrollbar and links you can follow,
-and in terminals with graphics, large titles and images in place of the rule and alt text.
+and in terminals with graphics, large titles and images in place of the rule and alt text. macOS's
+Terminal has no graphics, so it gets double-height titles and alt text.
 
 ## What's in it
 
@@ -179,6 +180,8 @@ Terminals with graphics but no placeholders get direct placements. Otherwise you
 (OSC 66) is rendered only by kitty. So h1 and h2 are drawn with stb_truetype and shown as images, three
 and two rows tall, wrapping as needed. A heading stays ordinary text when graphics are off, no font is
 found, the font lacks a character, or it contains a link. Find still reaches them, and so does copying.
+macOS's Terminal has no graphics, but it does have the DEC double-height lines of the VT100, so h1 and
+h2 use those there. `--plain-headings` turns off both.
 
 **`ansi` code blocks** keep the colors of pasted terminal output. Other sequences are dropped, and a
 bare carriage return restarts the line the way a progress bar does.
