@@ -73,6 +73,19 @@ and in terminals with graphics, large titles and images in place of the rule and
 
 ![The eight palettes](testdata/images/palettes.svg)
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jtnk/tmd/main/install.sh | sh
+```
+
+That puts `tmd` in `~/.local/bin`, with no need for root, on Linux and macOS, on x86-64 and ARM. Set
+`TMD_INSTALL_DIR` to put it somewhere else, or `TMD_VERSION=v0.2.0` for a particular release. Run it
+again to update.
+
+The binaries are also on the [releases page](https://github.com/jtnk/tmd/releases). They aren't
+notarized, so macOS blocks one downloaded with a browser: use the script, which it doesn't.
+
 ## Build
 
 You need [Zig](https://ziglang.org/download/) 0.17 or later (Ghostty 1.4 requires it).
