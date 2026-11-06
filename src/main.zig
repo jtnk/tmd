@@ -1,11 +1,11 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const term = @import("term.zig");
-const theme = @import("theme.zig");
-const md = @import("md.zig");
-const files = @import("files.zig");
+const theme = @import("layout").theme;
+const md = @import("layout").md;
+const files = @import("layout").files;
 const input = @import("input.zig");
-const width = @import("width.zig");
+const width = @import("layout").width;
 const trace = @import("trace.zig");
 const fetch = @import("fetch.zig");
 const bench = @import("bench.zig");
@@ -276,11 +276,15 @@ fn printDoc(gpa: std.mem.Allocator, text: []const u8, settings: *const Settings,
         sc.row(w);
         for (l.rowSpans(r)) |s| try sc.text(s.style, s.text);
         if (tty) try sc.raw("\x1b[0m");
-        out.clearRetainingCapacity();
         try out.appendSlice(gpa, std.mem.trimEnd(u8, sc.bytes.items, " "));
         try out.append(gpa, '\n');
-        stdoutWrite(out.items);
+        // A write per row was most of the time this took on a long document.
+        if (out.items.len >= 64 * 1024) {
+            stdoutWrite(out.items);
+            out.clearRetainingCapacity();
+        }
     }
+    stdoutWrite(out.items);
 }
 
 fn columnsEnv() u16 {

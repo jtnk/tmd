@@ -76,21 +76,48 @@ int tm_is_regular(const char *path) {
 
 static stbtt_fontinfo font;
 
+// Kerning between ASCII characters, by codepoint. Looking a pair up in the font is slow, and a
+// document's headings use the same few pairs again and again. 0x7fff means not looked up yet.
+#define KERN_FIRST 32
+#define KERN_COUNT 95
+#define KERN_UNKNOWN 0x7fff
+static short kern_pairs[KERN_COUNT][KERN_COUNT];
+
 // data must stay valid. Returns 0 if it isn't a usable font.
 int tm_font_load(const unsigned char *data) {
     int offset = stbtt_GetFontOffsetForIndex(data, 0);
-    return offset >= 0 && stbtt_InitFont(&font, data, offset);
+    if (offset < 0 || !stbtt_InitFont(&font, data, offset)) return 0;
+    for (int i = 0; i < KERN_COUNT; i++)
+        for (int j = 0; j < KERN_COUNT; j++) kern_pairs[i][j] = KERN_UNKNOWN;
+    return 1;
+}
+
+static int kern(int cp1, int glyph1, int cp2, int glyph2) {
+    int a = cp1 - KERN_FIRST, b = cp2 - KERN_FIRST;
+    if (a < 0 || a >= KERN_COUNT || b < 0 || b >= KERN_COUNT) return stbtt_GetGlyphKernAdvance(&font, glyph1, glyph2);
+    if (kern_pairs[a][b] == KERN_UNKNOWN) {
+        int k = stbtt_GetGlyphKernAdvance(&font, glyph1, glyph2);
+        if (k == KERN_UNKNOWN || k != (short)k) return k;
+        kern_pairs[a][b] = (short)k;
+    }
+    return kern_pairs[a][b];
 }
 
 // Width in pixels of a run of codepoints, or -1 if the font lacks one of them.
 int tm_text_width(const int *cps, int n, float px) {
     float scale = stbtt_ScaleForPixelHeight(&font, px), x = 0;
+    // The codepoint calls would each look their glyphs up again, four times a character.
+    int glyph = n > 0 ? stbtt_FindGlyphIndex(&font, cps[0]) : 0;
     for (int i = 0; i < n; i++) {
-        if (cps[i] != ' ' && stbtt_FindGlyphIndex(&font, cps[i]) == 0) return -1;
+        if (cps[i] != ' ' && glyph == 0) return -1;
         int advance, bearing;
-        stbtt_GetCodepointHMetrics(&font, cps[i], &advance, &bearing);
+        stbtt_GetGlyphHMetrics(&font, glyph, &advance, &bearing);
         x += advance * scale;
-        if (i + 1 < n) x += scale * stbtt_GetCodepointKernAdvance(&font, cps[i], cps[i + 1]);
+        if (i + 1 < n) {
+            int next = stbtt_FindGlyphIndex(&font, cps[i + 1]);
+            if (font.kern || font.gpos) x += scale * kern(cps[i], glyph, cps[i + 1], next);
+            glyph = next;
+        }
     }
     return (int)ceilf(x) + 1;
 }

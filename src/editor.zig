@@ -2,10 +2,10 @@
 //! file, which even at 2MB is well under a tenth of a frame, so no gap buffer or rope is needed and
 //! the text stays a plain slice for layout, search and saving.
 const std = @import("std");
-const theme = @import("theme.zig");
-const width = @import("width.zig");
-const inl = @import("inline.zig");
-const md = @import("md.zig");
+const theme = @import("layout").theme;
+const width = @import("layout").width;
+const inl = @import("layout").inl;
+const md = @import("layout").md;
 const screen_mod = @import("screen.zig");
 const Screen = screen_mod.Screen;
 const Style = theme.Style;
@@ -81,8 +81,10 @@ pub const Editor = struct {
     fn reindex(self: *Editor) !void {
         self.starts.clearRetainingCapacity();
         try self.starts.append(self.gpa, 0);
-        for (self.buf.items, 0..) |c, i| {
-            if (c == '\n') try self.starts.append(self.gpa, @intCast(i + 1));
+        var i: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, self.buf.items, i, '\n')) |p| {
+            i = p + 1;
+            try self.starts.append(self.gpa, @intCast(i));
         }
     }
 

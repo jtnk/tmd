@@ -70,6 +70,7 @@ pub const Layout = struct {
     /// Link targets. Span.link indexes this, plus one.
     links: std.ArrayList(Link) = .empty,
     headings: std.ArrayList(Heading) = .empty,
+    memo: Memo,
 
     pub fn deinit(self: *Layout) void {
         self.rows.deinit(self.gpa);
@@ -77,6 +78,7 @@ pub const Layout = struct {
         self.links.deinit(self.gpa);
         self.headings.deinit(self.gpa);
         self.arena.deinit();
+        self.memo.arena.deinit();
     }
 
     pub fn rowSpans(self: *const Layout, r: Row) []const Span {
@@ -115,7 +117,8 @@ fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
 }
 
 fn hline(comptime buf: []const u8, n: u32) []const u8 {
-    return buf[0 .. @min(n, 400) * 3];
+    const cells: usize = @min(n, 400);
+    return buf[0 .. cells * 3];
 }
 
 const Ctx = struct {
@@ -150,17 +153,61 @@ fn leavesTmd(url: []const u8) bool {
     return !isMarkdown(url[0 .. std.mem.indexOfAny(u8, url, "?#") orelse url.len]);
 }
 
-const Atom = struct {
+const Atom = packed struct(u128) {
     piece: u32,
     start: u32,
     end: u32,
-    width: u32,
-    kind: enum { word, space, br },
+    width: u28,
+    kind: enum(u2) { word, space, br },
     /// No line break allowed between this and the next atom.
     glue: bool = false,
+    /// A word with a single space right before it, in the same piece. Nearly every space is one of
+    /// these, and needs no atom of its own.
+    spaced: bool = false,
 };
 
 const CellLine = struct { first: u32, count: u32, width: u32 };
+
+const Run = struct { piece: u32 = 0, text: []const u8 = "", width: u32 = 0 };
+
+/// What a stretch of inline text came to.
+const Inlines = struct {
+    pieces: []Piece,
+    urls: []const []const u8,
+    /// The number of the first link. A lone image gives up its link when it can be drawn, and that
+    /// can change with the width, which renumbers every link after it.
+    first_link: u32,
+    /// Made by the first wrap: an image that's drawn never needs them.
+    atoms: ?[]const Atom = null,
+    lone_image: ?[]const u8 = null,
+};
+
+const Cell = struct {
+    pieces: []const Piece = &.{},
+    /// Index into Memo.inlines plus one, when there is a memo.
+    inlines: u32 = 0,
+};
+
+const Table = struct { rows: usize, aligns: []const Align, want: []const u32, cells: []const Cell };
+
+/// The parts of layout that don't depend on the width, for laying the same text out again. A
+/// document's blocks come in the same order at any width, so this is just a list to read back.
+/// Nothing is kept until a second layout of the same text, so only a resize pays for the memory.
+const Memo = struct {
+    arena: std.heap.ArenaAllocator,
+    /// The text this describes, once it's complete.
+    source: ?[]const u8 = null,
+    link_marks: bool = false,
+    lines: []const []const u8 = &.{},
+    refs: inl.Refs = .empty,
+    inlines: std.ArrayList(Inlines) = .empty,
+    tables: std.ArrayList(Table) = .empty,
+
+    fn reset(self: *Memo) void {
+        _ = self.arena.reset(.free_all);
+        self.* = .{ .arena = self.arena };
+    }
+};
 
 /// ASCII that can be part of a word.
 const ascii_word = blk: {
@@ -169,6 +216,8 @@ const ascii_word = blk: {
     for (" \t\n") |c| t[c] = false;
     break :blk t;
 };
+
+const Mode = enum { plain, record, replay };
 
 const Builder = struct {
     gpa: std.mem.Allocator,
@@ -182,12 +231,23 @@ const Builder = struct {
     // Reused per paragraph.
     toks: std.ArrayList(Tok) = .empty,
     urls: std.ArrayList([]const u8) = .empty,
-    pieces: std.ArrayList(Piece) = .empty,
+    piece_buf: std.ArrayList(Piece) = .empty,
     atoms: std.ArrayList(Atom) = .empty,
+    /// The inline text being laid out, and its place in the memo plus one.
+    pieces: []const Piece = &.{},
+    current: u32 = 0,
+    mode: Mode = .plain,
+    next_inlines: u32 = 0,
+    next_table: u32 = 0,
     // In a table cell, rows go here instead of the layout.
     cell: ?*std.ArrayList(CellLine) = null,
     cell_spans: std.ArrayList(Span) = .empty,
     line_width: u32 = 0,
+
+    /// For what pieces will point at, which has to last as long as they do.
+    fn keeper(self: *Builder) std.mem.Allocator {
+        return if (self.mode == .record) self.out.memo.arena.allocator() else self.a;
+    }
 
     fn spans(self: *Builder) *std.ArrayList(Span) {
         return if (self.cell != null) &self.cell_spans else &self.out.spans;
@@ -264,10 +324,26 @@ const Builder = struct {
 
     // Inlines to pieces.
 
+    fn replayInlines(self: *Builder) !void {
+        const m = &self.out.memo.inlines.items[self.next_inlines];
+        self.next_inlines += 1;
+        self.current = self.next_inlines;
+        const first: u32 = @intCast(self.out.links.items.len);
+        if (m.first_link != first) {
+            for (m.pieces) |*p| if (p.link != 0) {
+                p.link = p.link - m.first_link + first;
+            };
+            m.first_link = first;
+        }
+        for (m.urls) |u| try self.out.links.append(self.gpa, .{ .url = u, .row = no_row });
+        self.pieces = m.pieces;
+    }
+
     fn scanInline(self: *Builder, text: []const u8, base: Style) !void {
+        if (self.mode == .replay) return self.replayInlines();
         self.toks.clearRetainingCapacity();
         self.urls.clearRetainingCapacity();
-        self.pieces.clearRetainingCapacity();
+        self.piece_buf.clearRetainingCapacity();
         var s = inl.Scanner{ .a = self.a, .toks = &self.toks, .links = &self.urls, .refs = &self.refs };
         try s.scan(text);
 
@@ -291,39 +367,49 @@ const Builder = struct {
             const link = if (t.link != 0) base_link + t.link else 0;
             switch (t.kind) {
                 .syntax => {},
-                .br => try self.pieces.append(self.a, .{ .text = "\n", .style = st, .link = 0 }),
+                .br => try self.piece_buf.append(self.a, .{ .text = "\n", .style = st, .link = 0 }),
                 .delim => if (t.count > 0) {
                     // Whatever didn't pair stays as literal text.
-                    try self.pieces.append(self.a, .{ .text = t.text[0..t.count], .style = st, .link = link });
+                    try self.piece_buf.append(self.a, .{ .text = t.text[0..t.count], .style = st, .link = link });
                 },
                 .text, .bracket => {
                     if (t.image and t.link != seen_image) {
                         seen_image = t.link;
-                        try self.pieces.append(self.a, .{ .text = "▣ ", .style = st, .link = link, .image = true });
+                        try self.piece_buf.append(self.a, .{ .text = "▣ ", .style = st, .link = link, .image = true });
                     }
-                    try self.pieces.append(self.a, .{ .text = t.text, .style = st, .link = link, .image = t.image });
+                    try self.piece_buf.append(self.a, .{ .text = t.text, .style = st, .link = link, .image = t.image });
                 },
             }
         }
         if (self.opts.link_marks) try self.markLinks();
+        self.pieces = self.piece_buf.items;
+        self.current = 0;
+        if (self.mode == .record) {
+            const m = &self.out.memo;
+            const a = m.arena.allocator();
+            const kept = try a.dupe(Piece, self.piece_buf.items);
+            try m.inlines.append(a, .{ .pieces = kept, .urls = try a.dupe([]const u8, self.urls.items), .first_link = base_link });
+            self.pieces = kept;
+            self.current = @intCast(m.inlines.items.len);
+        }
     }
 
     /// Adds the arrow after the last piece of each link that leaves tmd. A link is often several
     /// pieces, so this looks at them all at once.
     fn markLinks(self: *Builder) !void {
-        var i = self.pieces.items.len;
+        var i = self.piece_buf.items.len;
         while (i > 0) : (i -= 1) {
-            const p = self.pieces.items[i - 1];
+            const p = self.piece_buf.items[i - 1];
             if (p.link == 0 or p.image) continue;
-            if (i < self.pieces.items.len and self.pieces.items[i].link == p.link) continue;
+            if (i < self.piece_buf.items.len and self.piece_buf.items[i].link == p.link) continue;
             if (!leavesTmd(self.out.links.items[p.link - 1].url)) continue;
-            try self.pieces.insert(self.a, i, .{ .text = link_mark, .style = p.style, .link = p.link });
+            try self.piece_buf.insert(self.a, i, .{ .text = link_mark, .style = p.style, .link = p.link });
         }
     }
 
     fn atomize(self: *Builder) !void {
         self.atoms.clearRetainingCapacity();
-        for (self.pieces.items, 0..) |p, pi| {
+        for (self.pieces, 0..) |p, pi| {
             const s = p.text;
             const idx: u32 = @intCast(pi);
             // An atom takes at least a byte, so this is enough for all of them.
@@ -333,10 +419,15 @@ const Builder = struct {
                 continue;
             }
             var i: usize = 0;
+            var spaced = false;
             while (i < s.len) {
                 if (s[i] == ' ' or s[i] == '\t' or s[i] == '\n') {
                     const st = i;
                     while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n')) i += 1;
+                    if (i < s.len and i - st == 1 and s[st] == ' ') {
+                        spaced = true;
+                        continue;
+                    }
                     self.atoms.appendAssumeCapacity(.{ .piece = idx, .start = @intCast(st), .end = @intCast(i), .width = 1, .kind = .space });
                     continue;
                 }
@@ -361,7 +452,8 @@ const Builder = struct {
                     w += c.width;
                     i += c.len;
                 }
-                self.atoms.appendAssumeCapacity(.{ .piece = idx, .start = @intCast(st), .end = @intCast(i), .width = w, .kind = .word });
+                self.atoms.appendAssumeCapacity(.{ .piece = idx, .start = @intCast(st), .end = @intCast(i), .width = @intCast(@min(w, std.math.maxInt(u28))), .kind = .word, .spaced = spaced });
+                spaced = false;
             }
         }
         // A word split across styles still can't break in the middle.
@@ -369,18 +461,29 @@ const Builder = struct {
         while (k + 1 < self.atoms.items.len) : (k += 1) {
             const x = &self.atoms.items[k];
             const y = self.atoms.items[k + 1];
-            if (x.kind == .word and y.kind == .word and x.piece != y.piece and x.width != 2 and y.width != 2) x.glue = true;
+            if (x.kind == .word and y.kind == .word and !y.spaced and x.piece != y.piece and x.width != 2 and y.width != 2) x.glue = true;
         }
     }
 
+    /// The current pieces as atoms.
+    fn currentAtoms(self: *Builder) ![]const Atom {
+        const m = if (self.current != 0) &self.out.memo.inlines.items[self.current - 1] else null;
+        if (m) |in| if (in.atoms) |kept| return kept;
+        try self.atomize();
+        const in = m orelse return self.atoms.items;
+        const kept = try self.out.memo.arena.allocator().dupe(Atom, self.atoms.items);
+        in.atoms = kept;
+        return kept;
+    }
+
     fn addAtom(self: *Builder, at: Atom) !void {
-        const p = self.pieces.items[at.piece];
+        const p = self.pieces[at.piece];
         try self.add(p.text[at.start..at.end], p.style, at.width, p.link);
     }
 
     /// An atom too wide for any line: cut it at cluster boundaries.
     fn addHard(self: *Builder, ctx: ?*Ctx, src: u32, at: Atom, w: u32, col: *u32) !void {
-        const p = self.pieces.items[at.piece];
+        const p = self.pieces[at.piece];
         var i: usize = at.start;
         var st = i;
         var run: u32 = 0;
@@ -402,18 +505,35 @@ const Builder = struct {
         col.* += run;
     }
 
+    /// Adds to a run of unlinked text, which goes on the row in one piece: most of a line is one.
+    fn extend(self: *Builder, run: *Run, piece: u32, text: []const u8, w: u32) !void {
+        if (run.piece == piece and run.text.ptr + run.text.len == text.ptr) {
+            run.text.len += text.len;
+            run.width += w;
+            return;
+        }
+        try self.endRun(run);
+        run.* = .{ .piece = piece, .text = text, .width = w };
+    }
+
+    fn endRun(self: *Builder, run: *Run) !void {
+        if (run.text.len > 0) try self.add(run.text, self.pieces[run.piece].style, run.width, 0);
+        run.* = .{};
+    }
+
     /// Word-wraps the current pieces into rows of width w.
     fn wrap(self: *Builder, ctx: ?*Ctx, src: u32, w: u32) !void {
-        try self.atomize();
-        const atoms = self.atoms.items;
+        const atoms = try self.currentAtoms();
         try self.begin(ctx, src);
         var col: u32 = 0;
         var pending: ?Atom = null;
+        var run: Run = .{};
         var k: usize = 0;
         while (k < atoms.len) {
             const at = atoms[k];
             switch (at.kind) {
                 .br => {
+                    try self.endRun(&run);
                     try self.finish();
                     try self.begin(ctx, src);
                     col = 0;
@@ -425,14 +545,16 @@ const Builder = struct {
                     k += 1;
                 },
                 .word => {
+                    if (at.spaced and col > 0) pending = .{ .piece = at.piece, .start = at.start - 1, .end = at.start, .width = 1, .kind = .space };
                     var e = k;
-                    var gw = at.width;
+                    var gw: u32 = at.width;
                     while (atoms[e].glue and e + 1 < atoms.len) {
                         e += 1;
                         gw += atoms[e].width;
                     }
                     const sp: u32 = if (pending != null) 1 else 0;
                     if (col > 0 and col + sp + gw > w) {
+                        try self.endRun(&run);
                         try self.finish();
                         try self.begin(ctx, src);
                         self.row.join = if (pending != null) .space else .tight;
@@ -440,36 +562,59 @@ const Builder = struct {
                         pending = null;
                     }
                     if (pending) |s| {
-                        const p = self.pieces.items[s.piece];
+                        const p = self.pieces[s.piece];
                         // The original space when it's a single one, so the span can stay whole.
                         const text = if (s.end - s.start == 1 and p.text[s.start] == ' ') p.text[s.start..s.end] else spaces_buf[0..1];
-                        try self.add(text, p.style, 1, 0);
+                        try self.extend(&run, s.piece, text, 1);
                         col += 1;
                         pending = null;
                     }
                     for (atoms[k .. e + 1]) |x| {
+                        const p = self.pieces[x.piece];
                         if (gw > w) {
+                            try self.endRun(&run);
                             try self.addHard(ctx, src, x, w, &col);
+                        } else if (p.link == 0) {
+                            try self.extend(&run, x.piece, p.text[x.start..x.end], x.width);
+                            col += x.width;
                         } else {
+                            // A link's spaces aren't part of it, so its words stay apart.
+                            try self.endRun(&run);
                             try self.addAtom(x);
                             col += x.width;
                         }
+                    }
+                    // Nearly every word after a plain one just follows it, in the same run.
+                    const last = atoms[e];
+                    if (gw <= w and self.pieces[last.piece].link == 0) {
+                        while (e + 1 < atoms.len and col > 0) {
+                            const n = atoms[e + 1];
+                            if (!n.spaced or n.piece != last.piece or n.glue or col + 1 + n.width > w) break;
+                            col += 1 + n.width;
+                            run.width += 1 + n.width;
+                            e += 1;
+                        }
+                        run.text.len += atoms[e].end - last.end;
                     }
                     k = e + 1;
                 },
             }
         }
+        try self.endRun(&run);
         try self.finish();
     }
 
     // Blocks.
 
     fn paragraphText(self: *Builder, lines: []const []const u8) ![]const u8 {
+        // Nothing reads it: the pieces are already there.
+        if (self.mode == .replay) return "";
         if (lines.len == 1) return std.mem.trimStart(u8, lines[0], " \t");
+        const a = self.keeper();
         var buf: std.ArrayList(u8) = .empty;
         for (lines, 0..) |l, i| {
-            if (i > 0) try buf.append(self.a, '\n');
-            try buf.appendSlice(self.a, std.mem.trimStart(u8, l, " \t"));
+            if (i > 0) try buf.append(a, '\n');
+            try buf.appendSlice(a, std.mem.trimStart(u8, l, " \t"));
         }
         return buf.items;
     }
@@ -480,7 +625,9 @@ const Builder = struct {
         const text = std.mem.trimEnd(u8, try self.paragraphText(lines), " \t");
         const links_before = self.out.links.items.len;
         try self.scanInline(text, ctx.style);
-        if (self.loneImage()) |url| {
+        const lone = if (self.mode == .replay) self.out.memo.inlines.items[self.current - 1].lone_image else self.loneImage();
+        if (self.mode == .record) self.out.memo.inlines.items[self.current - 1].lone_image = lone;
+        if (lone) |url| {
             if (self.opts.images) |im| {
                 const room: u16 = @intCast(@min(ctx.width, 1000));
                 if (im.fit(im.ctx, url, room, self.opts.max_image_rows)) |f| {
@@ -532,7 +679,7 @@ const Builder = struct {
         try self.scanInline(text, st);
 
         var slug: std.ArrayList(u8) = .empty;
-        for (self.pieces.items) |p| for (if (isLinkMark(p.text)) "" else p.text) |c| {
+        for (self.pieces) |p| for (if (isLinkMark(p.text)) "" else p.text) |c| {
             if (c == ' ') {
                 try slug.append(self.a, '-');
             } else if (c >= 0x80 or std.ascii.isAlphanumeric(c) or c == '-' or c == '_') {
@@ -560,7 +707,7 @@ const Builder = struct {
     fn bigHeading(self: *Builder, level: u32, ctx: *Ctx, src: u32) !bool {
         const im = self.opts.images orelse return false;
         var plain: std.ArrayList(u8) = .empty;
-        for (self.pieces.items) |p| {
+        for (self.pieces) |p| {
             // A link or a code span would lose its meaning as a picture.
             if (p.link != 0 or p.text[0] == '\n') return false;
             try plain.appendSlice(self.a, p.text);
@@ -669,16 +816,16 @@ const Builder = struct {
     /// A line of terminal output: colors are honored through Ghostty's SGR decoder, a bare CR
     /// restarts the line as a progress bar would, and every other sequence is dropped.
     fn ansiLine(self: *Builder, line: []const u8, base: Style, w: u32, ctx: *Ctx, src: u32) !void {
-        self.pieces.clearRetainingCapacity();
+        self.piece_buf.clearRetainingCapacity();
         var st = base;
         var i: usize = 0;
         var start: usize = 0;
         while (i < line.len) {
             const c = line[i];
             if (c == 0x1b or c == '\r') {
-                if (i > start) try self.pieces.append(self.a, .{ .text = line[start..i], .style = st, .link = 0 });
+                if (i > start) try self.piece_buf.append(self.a, .{ .text = line[start..i], .style = st, .link = 0 });
                 if (c == '\r') {
-                    self.pieces.clearRetainingCapacity();
+                    self.piece_buf.clearRetainingCapacity();
                     i += 1;
                 } else i = skipEscape(line, i, &st, base);
                 start = i;
@@ -686,14 +833,14 @@ const Builder = struct {
             }
             i += 1;
         }
-        if (line.len > start) try self.pieces.append(self.a, .{ .text = line[start..], .style = st, .link = 0 });
+        if (line.len > start) try self.piece_buf.append(self.a, .{ .text = line[start..], .style = st, .link = 0 });
 
         try self.begin(ctx, src);
         self.row.fill = Color.role(.code_bg);
         self.row.lead += 1;
         try self.add(spaces_buf[0..1], base, 1, 0);
         var col: u32 = 0;
-        for (self.pieces.items) |p| {
+        for (self.piece_buf.items) |p| {
             var j: usize = 0;
             var from: usize = 0;
             var run: u32 = 0;
@@ -735,13 +882,14 @@ const Builder = struct {
         self.need_gap = true;
     }
 
-    fn table(self: *Builder, lines: []const []const u8, ctx: *Ctx) !void {
-        try self.gap(ctx);
-        const src = self.off(lines[0]);
+    /// Splits a table into cells and scans them. Cells are visited in the same order here as they
+    /// are when wrapped, so their links are already in place.
+    fn parseTable(self: *Builder, lines: []const []const u8, ctx: *Ctx) !Table {
         const a = self.a;
+        const keep = self.keeper();
         const header = try splitRow(a, lines[0]);
         const n = header.len;
-        const aligns = try a.alloc(Align, n);
+        const aligns = try keep.alloc(Align, n);
         @memset(aligns, .left);
         const delim = try splitRow(a, lines[1]);
         for (delim, 0..) |d, i| {
@@ -756,22 +904,43 @@ const Builder = struct {
         const grid = try a.alloc([]const []const u8, body.len + 1);
         grid[0] = header;
         for (body, 1..) |l, i| grid[i] = try splitRow(a, l);
-        const want = try a.alloc(u32, n);
+        const want = try keep.alloc(u32, n);
         @memset(want, 1);
-        // Scanned once, here, and kept for wrapping once the widths are known. Cells are visited in
-        // the same order both times, so their links are already in place.
-        const scanned = try a.alloc([]const Piece, grid.len * n);
-        @memset(scanned, @as([]const Piece, &.{}));
+        const cells = try keep.alloc(Cell, grid.len * n);
+        @memset(cells, .{});
         for (grid, 0..) |row, ri| {
             for (row, 0..) |cell, c| {
                 if (c >= n) break;
                 try self.scanInline(cell, cellStyle(ctx, ri == 0));
                 var w: u32 = 0;
-                for (self.pieces.items) |p| w += width.of(p.text);
+                for (self.pieces) |p| w += width.of(p.text);
                 want[c] = @max(want[c], w);
-                scanned[ri * n + c] = try a.dupe(Piece, self.pieces.items);
+                cells[ri * n + c] = .{
+                    .pieces = if (self.mode == .record) self.pieces else try a.dupe(Piece, self.pieces),
+                    .inlines = self.current,
+                };
             }
         }
+        const t = Table{ .rows = grid.len, .aligns = aligns, .want = want, .cells = cells };
+        if (self.mode == .record) try self.out.memo.tables.append(keep, t);
+        return t;
+    }
+
+    fn replayTable(self: *Builder) !Table {
+        const t = self.out.memo.tables.items[self.next_table];
+        self.next_table += 1;
+        for (t.cells) |c| if (c.inlines != 0) try self.replayInlines();
+        return t;
+    }
+
+    fn table(self: *Builder, lines: []const []const u8, ctx: *Ctx) !void {
+        try self.gap(ctx);
+        const src = self.off(lines[0]);
+        const a = self.a;
+        const t = if (self.mode == .replay) try self.replayTable() else try self.parseTable(lines, ctx);
+        const n = t.want.len;
+        const aligns = t.aligns;
+        const want = t.want;
         const widths = try fitColumns(a, want, ctx.width);
         // Once a cell wraps, rows differ in height, and without a line between them that reads as
         // uneven spacing.
@@ -780,15 +949,16 @@ const Builder = struct {
         const line_style = Style{ .fg = Color.role(.dim) };
         const middle = try self.borderText(widths, "├", "┼", "┤");
         try self.tableBorder(try self.borderText(widths, "┌", "┬", "┐"), ctx, src, line_style);
-        for (0..grid.len) |ri| {
+        const cells = try a.alloc(std.ArrayList(CellLine), n);
+        @memset(cells, .empty);
+        for (0..t.rows) |ri| {
             // Wrap every cell, then lay the cell lines side by side.
-            var cells = try a.alloc(std.ArrayList(CellLine), n);
             self.cell_spans.clearRetainingCapacity();
             var height: usize = 1;
             for (0..n) |c| {
-                cells[c] = .empty;
-                self.pieces.clearRetainingCapacity();
-                try self.pieces.appendSlice(self.a, scanned[ri * n + c]);
+                cells[c].clearRetainingCapacity();
+                self.pieces = t.cells[ri * n + c].pieces;
+                self.current = t.cells[ri * n + c].inlines;
                 self.cell = &cells[c];
                 try self.wrap(null, src, widths[c]);
                 self.cell = null;
@@ -816,7 +986,7 @@ const Builder = struct {
                 }
                 try self.finish();
             }
-            if (ri == 0 or (ruled and ri + 1 < grid.len)) try self.tableBorder(middle, ctx, src, line_style);
+            if (ri == 0 or (ruled and ri + 1 < t.rows)) try self.tableBorder(middle, ctx, src, line_style);
         }
         try self.tableBorder(try self.borderText(widths, "└", "┴", "┘"), ctx, src, line_style);
         self.need_gap = true;
@@ -1393,29 +1563,29 @@ fn refDefinition(line: []const u8) ?RefDef {
 
 /// Lays out a whole document.
 pub fn layout(gpa: std.mem.Allocator, source: []const u8, opts: Options) !Layout {
-    var out = Layout{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
+    var out = Layout{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa), .memo = .{ .arena = std.heap.ArenaAllocator.init(gpa) } };
     errdefer out.deinit();
-    try build(&out, source, opts);
+    try build(&out, source, opts, .plain);
     return out;
 }
 
 /// Lays a document out again over an old layout, keeping its memory: a resize shouldn't have to give
-/// all of it back and fault it all in again.
-pub fn relayout(out: *Layout, source: []const u8, opts: Options) !void {
+/// all of it back and fault it all in again. same_text says that source hasn't changed since the
+/// last layout, so that whatever didn't depend on the width can be used again.
+pub fn relayout(out: *Layout, source: []const u8, opts: Options, same_text: bool) !void {
     out.rows.clearRetainingCapacity();
     out.spans.clearRetainingCapacity();
     out.links.clearRetainingCapacity();
     out.headings.clearRetainingCapacity();
     _ = out.arena.reset(.retain_capacity);
-    try build(out, source, opts);
+    const m = &out.memo;
+    const known = if (m.source) |s| s.ptr == source.ptr and s.len == source.len and m.link_marks == opts.link_marks else false;
+    if (!same_text or !known) m.reset();
+    try build(out, source, opts, if (!same_text) .plain else if (known) .replay else .record);
 }
 
-fn build(out: *Layout, source: []const u8, opts: Options) !void {
-    const gpa = out.gpa;
-    const a = out.arena.allocator();
-    var b = Builder{ .gpa = gpa, .a = a, .src = source, .opts = opts, .out = out };
-    defer b.cell_spans.deinit(gpa);
-
+fn splitLines(b: *Builder, source: []const u8) ![]const []const u8 {
+    const a = b.keeper();
     // The arena also holds per-paragraph scratch, so lines are counted first to size it once.
     var lines: std.ArrayList([]const u8) = .empty;
     // Sized for lines of about 30 bytes, so that counting them isn't another pass over the document.
@@ -1434,9 +1604,19 @@ fn build(out: *Layout, source: []const u8, opts: Options) !void {
             }
         }
     }
+    return lines.items;
+}
 
+fn build(out: *Layout, source: []const u8, opts: Options, mode: Mode) !void {
+    const gpa = out.gpa;
+    const a = out.arena.allocator();
+    var b = Builder{ .gpa = gpa, .a = a, .src = source, .opts = opts, .out = out, .mode = mode };
+    defer b.cell_spans.deinit(gpa);
+
+    const m = &out.memo;
+    const all = if (mode == .replay) m.lines else try splitLines(&b, source);
     var ctx = Ctx{ .width = @max(opts.width, 8) };
-    var body = lines.items;
+    var body = all;
 
     // Front matter shows as metadata instead of a rule and a heading.
     if (body.len > 2 and std.mem.eql(u8, body[0], "---")) {
@@ -1453,6 +1633,12 @@ fn build(out: *Layout, source: []const u8, opts: Options) !void {
     if (out.rows.items.len == 0) {
         try b.begin(null, 0);
         try b.finish();
+    }
+    if (mode == .record) {
+        m.lines = all;
+        m.refs = b.refs;
+        m.link_marks = opts.link_marks;
+        m.source = source;
     }
 }
 
@@ -1481,9 +1667,104 @@ fn expectRender(src: []const u8, w: u16, want: []const u8) !void {
     try testing.expectEqualStrings(want, got);
 }
 
+/// Draws an image only when there's room for it, so that links come and go with the width.
+const FussyImages = struct {
+    fn fit(_: *anyopaque, _: []const u8, cols: u16, _: u16) ?Images.Fit {
+        return if (cols >= 30) .{ .image = 1, .cols = 4, .rows = 2 } else null;
+    }
+    fn measure(_: *anyopaque, text: []const u8, _: u32) ?u16 {
+        return @intCast(text.len * 3);
+    }
+    fn heading(_: *anyopaque, _: []const u8, _: u32, cols: u16) ?Images.Fit {
+        return .{ .image = 2, .cols = cols, .rows = 3 };
+    }
+};
+
+fn expectSameLayout(want: *const Layout, got: *const Layout) !void {
+    try testing.expectEqual(want.rows.items.len, got.rows.items.len);
+    for (want.rows.items, got.rows.items) |a, b| try testing.expectEqual(a, b);
+    try testing.expectEqual(want.spans.items.len, got.spans.items.len);
+    for (want.spans.items, got.spans.items) |a, b| {
+        try testing.expectEqualStrings(a.text, b.text);
+        try testing.expectEqual(a.width, b.width);
+        try testing.expectEqual(a.link, b.link);
+        try testing.expect(a.style.eql(b.style));
+    }
+    try testing.expectEqual(want.links.items.len, got.links.items.len);
+    for (want.links.items, got.links.items) |a, b| {
+        try testing.expectEqualStrings(a.url, b.url);
+        try testing.expectEqual(a.row, b.row);
+    }
+    try testing.expectEqual(want.headings.items.len, got.headings.items.len);
+    for (want.headings.items, got.headings.items) |a, b| {
+        try testing.expectEqualStrings(a.slug, b.slug);
+        try testing.expectEqualStrings(a.text, b.text);
+        try testing.expectEqual(a.row, b.row);
+    }
+}
+
+test "laying the same text out again matches starting over" {
+    const docs = [_][]const u8{
+        "",
+        "plain\n",
+        "---\ntitle: x\n---\n\n# One [link](a.md)\n\n## Two words here\n\nSetext\nover lines\n===\n",
+        "first [a](https://a.io) **bold *both*** `code`\nnext line  \nbroken\\\nagain &amp; more\n\n![only](x.png)\n\nafter [b](b.md) <https://c.io> https://d.io\n",
+        "![wide](x.png)\n\n[late](https://l.io) and [ref][r] and [r]\n\n![again](y.png)\n\n[end](z.md)\n\n[r]: https://r.io\n",
+        "| a | [b](https://b.io) |\n|---|:-:|\n| x **y** | ![i](i.png) | extra |\n| ragged |\n| long long long long long long long long long | [c](c.md) |\n\nnext [d](d.md)\n",
+        "- item [a](a.md)\n  more\n\n  - [ ] sub\n  - [x] done\n\n1. one\n2. two\n\n> quoted [q](q.md)\n> ![img](x.png)\n> | t |\n> |---|\n> | c |\n",
+        "1. | a | b |\n   |---|---|\n   | c | d |\n\n   after\n2. | e |\n   |---|\n   | a very long cell that has to wrap at the narrow widths |\n\n> | q |\n> |---|\n> | r |\n\n- | s |\n  |---|\n  | t |\n",
+        "```\ncode\ttabbed\n```\n\n```ansi\n\x1b[31mred\x1b[0m\n```\n\n    indented\n\n你好世界你好世界 and averyveryveryveryveryverylongword 👩‍💻👩‍💻\n",
+    };
+    const widths = [_]u16{ 40, 40, 12, 80, 29, 31, 8, 200, 29 };
+    var token: u8 = 0;
+    const images = Images{ .ctx = &token, .fit = FussyImages.fit, .measure = FussyImages.measure, .heading = FussyImages.heading };
+    for (docs) |doc| for ([_]?Images{ null, images }) |im| for ([_]bool{ false, true }) |marks| {
+        var l = try layout(testing.allocator, doc, .{ .width = 40, .images = im, .link_marks = marks });
+        defer l.deinit();
+        for (widths) |w| {
+            const opts = Options{ .width = w, .images = im, .link_marks = marks };
+            try relayout(&l, doc, opts, true);
+            var fresh = try layout(testing.allocator, doc, opts);
+            defer fresh.deinit();
+            try expectSameLayout(&fresh, &l);
+        }
+    };
+}
+
+test "laying out changed text forgets the old" {
+    var buf = "one [a](a.md)\n\ntwo\n".*;
+    var l = try layout(testing.allocator, &buf, .{ .width = 20 });
+    defer l.deinit();
+    try relayout(&l, &buf, .{ .width = 30 }, true);
+    try relayout(&l, &buf, .{ .width = 30 }, true);
+    buf[0] = 'O';
+    try relayout(&l, &buf, .{ .width = 30 }, false);
+    var fresh = try layout(testing.allocator, &buf, .{ .width = 30 });
+    defer fresh.deinit();
+    try expectSameLayout(&fresh, &l);
+    try relayout(&l, &buf, .{ .width = 25 }, true);
+    try relayout(&l, &buf, .{ .width = 30 }, true);
+    try expectSameLayout(&fresh, &l);
+    // The same call with different marks can't use what was kept.
+    try relayout(&l, &buf, .{ .width = 30, .link_marks = true }, true);
+    var marked = try layout(testing.allocator, &buf, .{ .width = 30, .link_marks = true });
+    defer marked.deinit();
+    try expectSameLayout(&marked, &l);
+}
+
 test "paragraphs wrap and symbols disappear" {
     try expectRender("hello **big** world and more", 12, "hello big\nworld and\nmore\n");
     try expectRender("one\ntwo\n\nthree", 40, "one two\n\nthree\n");
+}
+
+test "a rule as wide as the text, past 170 columns too" {
+    for ([_]u16{ 170, 171, 200, 400 }) |w| {
+        var l = try layout(testing.allocator, "---\n", .{ .width = w });
+        defer l.deinit();
+        const s = l.rowSpans(l.rows.items[0])[0];
+        try testing.expectEqual(@as(u32, w), s.width);
+        try testing.expectEqual(@as(usize, w) * 3, s.text.len);
+    }
 }
 
 test "headings" {

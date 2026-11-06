@@ -1,8 +1,8 @@
 //! Path completion for the Open prompt.
 const std = @import("std");
 const c = std.c;
-const files = @import("files.zig");
-const md = @import("md.zig");
+const files = @import("layout").files;
+const md = @import("layout").md;
 
 pub const Result = struct {
     /// What the prompt should now say.

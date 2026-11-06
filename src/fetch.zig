@@ -3,7 +3,7 @@
 //! a link: a document can't make a request by itself.
 const std = @import("std");
 const c = std.c;
-const files = @import("files.zig");
+const files = @import("layout").files;
 
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 

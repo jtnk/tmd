@@ -3,9 +3,9 @@
 //! diffs exactly like text. Terminals without placeholders get direct placements, re-placed as the
 //! view moves. PNG files are sent as they are; everything else is decoded and scaled first.
 const std = @import("std");
-const files = @import("files.zig");
+const files = @import("layout").files;
 const diacritics = @import("diacritics.zig").table;
-const md = @import("md.zig");
+const md = @import("layout").md;
 
 // vendor/decoders.c
 const c = struct {
