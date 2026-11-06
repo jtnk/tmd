@@ -79,9 +79,12 @@ and in terminals with graphics, large titles and images in place of the rule and
 curl -fsSL https://raw.githubusercontent.com/jtnk/tmd/main/install.sh | sh
 ```
 
-That puts `tmd` in `~/.local/bin`, with no need for root, on Linux and macOS, on x86-64 and ARM. Set
-`TMD_INSTALL_DIR` to put it somewhere else, or `TMD_VERSION=v0.2.0` for a particular release. Run it
-again to update.
+That puts `tmd` in `~/.local/bin`, with no need for root, on Linux and macOS, on x86-64 and ARM. If
+that isn't on your `PATH`, it adds a line to your shell's config, and prints the command that does the
+same for the terminal you're in. Run it again to update.
+
+Set `TMD_INSTALL_DIR` to put it somewhere else, `TMD_VERSION=v0.2.0` for a particular release, or
+`TMD_NO_MODIFY_PATH=1` to leave your shell's config alone.
 
 The binaries are also on the [releases page](https://github.com/jtnk/tmd/releases). They aren't
 notarized, so macOS blocks one downloaded with a browser: use the script, which it doesn't.
