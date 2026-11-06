@@ -5,6 +5,7 @@
 #
 # TMD_INSTALL_DIR says where to put it, instead of ~/.local/bin.
 # TMD_VERSION asks for a release, such as v0.2.0, instead of the latest.
+# TMD_NO_MODIFY_PATH=1 leaves your shell's config alone.
 set -eu
 
 repo=jtnk/tmd
@@ -32,6 +33,44 @@ check() {
     else
         fail "installing needs sha256sum or shasum, to check the download"
     fi
+}
+
+# Puts dir on the PATH of new terminals. Nothing can change the PATH of the shell that ran this, so
+# that takes a command of its own, which this prints.
+setup_path() {
+    dir=$1
+    # In terms of $HOME if it can be, as people share these files between machines.
+    case "$dir" in
+        "$HOME"/*) shown="\$HOME/${dir#"$HOME"/}" ;;
+        *) shown=$dir ;;
+    esac
+    line="export PATH=\"$shown:\$PATH\""
+    rc=""
+    shell="${SHELL:-}"
+    case "${shell##*/}" in
+        zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+        bash)
+            # Terminals on macOS start login shells, which don't read .bashrc.
+            if [ "$os" = macos ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi
+            ;;
+        fish)
+            rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/tmd.fish"
+            line="fish_add_path \"$shown\""
+            ;;
+    esac
+
+    if [ -z "$rc" ] || [ -n "${TMD_NO_MODIFY_PATH:-}" ]; then
+        printf '%s is not on your PATH. To add it, put this in your shell config:\n\n    %s\n' "$dir" "$line"
+        return
+    fi
+    if ! grep -qsF "$line" "$rc"; then
+        mkdir -p "$(dirname "$rc")" 2>/dev/null || true
+        if ! (printf '\n# Added by the tmd installer\n%s\n' "$line" >>"$rc") 2>/dev/null; then
+            printf "Couldn't change %s. To put tmd on your PATH, add this to it:\n\n    %s\n" "$rc" "$line"
+            return
+        fi
+    fi
+    printf 'Added %s to your PATH in %s, for new terminals. To use tmd in this one, run:\n\n    %s\n' "$dir" "$rc" "$line"
 }
 
 # Everything happens in here, so that a download cut short can't run half of it.
@@ -75,7 +114,7 @@ main() {
     echo "Installed $("$dir/tmd" --version) to $dir/tmd"
     case ":$PATH:" in
         *":$dir:"*) ;;
-        *) echo "$dir isn't on your PATH yet, so add it to your shell's config." ;;
+        *) setup_path "$dir" ;;
     esac
 }
 
