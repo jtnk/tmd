@@ -1,19 +1,19 @@
 //! The application: tabs, modes, keys, and painting a frame. It never touches the terminal. Bytes go
 //! in through event() and come out of frame(), so the benchmark and the tests drive the real thing.
 const std = @import("std");
-const theme = @import("theme.zig");
-const md = @import("md.zig");
+const theme = @import("layout").theme;
+const md = @import("layout").md;
 const selection = @import("selection.zig");
 const Selection = selection.Selection;
 const input = @import("input.zig");
 const images = @import("images.zig");
-const files = @import("files.zig");
+const files = @import("layout").files;
 const fetch = @import("fetch.zig");
 const complete = @import("complete.zig");
 const trace = @import("trace.zig");
 const build_options = @import("build_options");
 const tidy = @import("tidy.zig");
-const width = @import("width.zig");
+const width = @import("layout").width;
 const screen_mod = @import("screen.zig");
 const editor = @import("editor.zig");
 const Editor = editor.Editor;
@@ -302,7 +302,7 @@ pub const App = struct {
             .link_marks = true,
         };
         if (t.layout) |*l| {
-            md.relayout(l, t.ed.text(), opts) catch |e| {
+            md.relayout(l, t.ed.text(), opts, !text_changed) catch |e| {
                 l.deinit();
                 t.layout = null;
                 return e;
@@ -1272,9 +1272,15 @@ pub const App = struct {
         _ = trace.end(.paint, paint0);
 
         const flush0 = trace.now();
-        const hint = if (t.mode == .edit or self.store.mode == .direct) 0 else self.scroll_hint;
-        self.scroll_hint = 0;
         const bar = self.barRows();
+        // The editor's rows wrap, so it's simpler to see how far they moved than to work it out.
+        const hint = if (self.store.mode == .direct)
+            0
+        else if (t.mode == .edit)
+            sc.detectScroll(bar, bar + self.viewRows())
+        else
+            self.scroll_hint;
+        self.scroll_hint = 0;
         try sc.flush(&self.out, cursor, hint, bar, bar + self.viewRows());
         _ = trace.end(.flush, flush0);
 

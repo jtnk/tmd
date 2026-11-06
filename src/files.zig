@@ -112,6 +112,16 @@ pub fn writeAtomic(gpa: std.mem.Allocator, path: [:0]const u8, bytes: []const u8
 pub const Text = struct { bytes: []u8, crlf: bool };
 
 /// Normalizes file contents for editing: UTF-8 (Latin-1 if it isn't valid), no BOM, LF line ends.
+/// Looks for the \r alone, which a single byte's search does much faster than two bytes' would.
+fn hasCrlf(s: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, s, i, '\r')) |p| {
+        if (p + 1 < s.len and s[p + 1] == '\n') return true;
+        i = p + 1;
+    }
+    return false;
+}
+
 pub fn decode(gpa: std.mem.Allocator, raw: []u8) !Text {
     var s = raw;
     defer gpa.free(raw);
@@ -132,7 +142,7 @@ pub fn decode(gpa: std.mem.Allocator, raw: []u8) !Text {
             }
         }
     }
-    const crlf = std.mem.indexOf(u8, out.items, "\r\n") != null;
+    const crlf = hasCrlf(out.items);
     if (crlf) {
         var w: usize = 0;
         for (out.items, 0..) |b, i| {
@@ -143,6 +153,12 @@ pub fn decode(gpa: std.mem.Allocator, raw: []u8) !Text {
         out.items.len = w;
     }
     return .{ .bytes = try out.toOwnedSlice(gpa), .crlf = crlf };
+}
+
+test "finding a Windows line ending" {
+    const t = std.testing;
+    for ([_][]const u8{ "\r\n", "a\r\n", "\r\nb", "a\rb\r\nc", "\r\r\n" }) |s| try t.expect(hasCrlf(s));
+    for ([_][]const u8{ "", "\r", "\n", "a\r", "\n\r", "a\rb\nc", "\r\r" }) |s| try t.expect(!hasCrlf(s));
 }
 
 test "decoding" {

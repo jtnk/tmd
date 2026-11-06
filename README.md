@@ -183,19 +183,19 @@ anything: a local file only opens if it's a known kind of document or picture, n
 
 `tmd --bench file.md` drives the real app through scrolling, jumping, resizing, typing and toggling,
 and exits 1 if a scenario's p99 frame misses 60 fps. A 2MB document reaches its first frame in about
-27ms, and on that file (Apple silicon, 120 x 40):
+20ms, and on that file (Apple silicon, 120 x 40):
 
 | Scenario | p50 ms | p99 ms | Best fps target met |
 |---|--:|--:|--:|
-| Scroll by line | 0.06 | 0.16 | 1000 |
-| Scroll by page | 0.13 | 0.25 | 1000 |
-| Jump top/bottom | 0.10 | 0.12 | 1000 |
-| Cursor movement | 0.05 | 0.06 | 1000 |
-| Resize | 16.2 | 17.7 | none |
+| Scroll by line | 0.03 | 0.15 | 1000 |
+| Scroll by page | 0.11 | 0.35 | 1000 |
+| Jump top/bottom | 0.04 | 0.10 | 1000 |
+| Cursor movement | 0.04 | 0.11 | 1000 |
+| Resize | 5.7 | 8.6 | 60 |
 
-Resizing lays the whole document out again. At 2MB the typical frame fits 60 fps and the slowest ones
-just miss it, so this file still fails the benchmark, and it's the known gap. At 200KB it takes under
-2ms. `perf/loops.md` records what was tried, including everything that didn't work.
+Resizing wraps the whole document again, and keeps what doesn't depend on the width for the next time.
+So the first resize of a 2MB file takes about 20ms, and after that a frame takes about 6ms. At 200KB
+that's about 0.5ms. `perf/loops.md` records what was tried, including everything that didn't work.
 
 `F12` adds three rows under the status line: frame times over the last 120 frames with a graph, the
 frame rate, and what the last frame sent. `fps` is frames drawn in the last second, which is 0 at rest

@@ -357,6 +357,8 @@ fn autolink(s: []const u8) ?usize {
 }
 
 fn bareUrl(s: []const u8) ?usize {
+    // This sees every word starting with h or w, and nearly all of them end here.
+    if (s.len < 4 or (s[1] != 't' and s[1] != 'w')) return null;
     if (!std.mem.startsWith(u8, s, "https://") and !std.mem.startsWith(u8, s, "http://") and
         !std.mem.startsWith(u8, s, "www.")) return null;
     var n: usize = 0;

@@ -2,8 +2,8 @@
 //! sent, so an idle or scrolling viewer writes almost nothing. Scrolls use the terminal's own
 //! scroll, leaving just the newly exposed rows to send.
 const std = @import("std");
-const theme = @import("theme.zig");
-const width = @import("width.zig");
+const theme = @import("layout").theme;
+const width = @import("layout").width;
 const Style = theme.Style;
 
 pub const Cursor = struct { x: u16, y: u16 };
@@ -133,6 +133,32 @@ pub const Screen = struct {
             const h = std.hash.Wyhash.hash(0, self.bytes.items[self.starts[i]..self.starts[i + 1]]);
             self.cur[i] = h | 1; // 0 means unknown
         }
+    }
+
+    /// How far rows [top, bottom) have moved up since the last flush (negative for down), or 0, for
+    /// callers that don't know. It has to beat not moving at all: blank rows match anywhere.
+    pub fn detectScroll(self: *const Screen, top: u16, bottom: u16) i32 {
+        var best: i32 = 0;
+        var most = matching(self.prev[top..bottom], self.cur[top..bottom]);
+        for ([_]i32{ 1, -1, 2, -2, 3, -3 }) |s| {
+            const n: u16 = @intCast(@abs(s));
+            if (bottom - top <= n) break;
+            const same = if (s > 0)
+                matching(self.prev[top + n .. bottom], self.cur[top .. bottom - n])
+            else
+                matching(self.prev[top .. bottom - n], self.cur[top + n .. bottom]);
+            if (same > most) {
+                most = same;
+                best = s;
+            }
+        }
+        return best;
+    }
+
+    fn matching(a: []const u64, b: []const u64) usize {
+        var same: usize = 0;
+        for (a, b) |x, y| same += @intFromBool(x == y);
+        return same;
     }
 
     /// Sends the frame. scroll is how many rows the content in rows [top, bottom) moved up (negative

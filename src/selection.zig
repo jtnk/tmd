@@ -2,8 +2,8 @@
 //! and copying turns those cells back into the text they came from: wrapped lines become one line
 //! again, and what only decorates a row is left out.
 const std = @import("std");
-const md = @import("md.zig");
-const width = @import("width.zig");
+const md = @import("layout").md;
+const width = @import("layout").width;
 
 pub const Point = struct { row: u32, col: u32 };
 

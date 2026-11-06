@@ -5,9 +5,9 @@ const vt = @import("ghostty-vt");
 const build_options = @import("build_options");
 const app_mod = @import("app.zig");
 const input = @import("input.zig");
-const md = @import("md.zig");
-const width = @import("width.zig");
-const files = @import("files.zig");
+const md = @import("layout").md;
+const width = @import("layout").width;
+const files = @import("layout").files;
 const App = app_mod.App;
 const testing = std.testing;
 const gpa = testing.allocator;
@@ -153,6 +153,61 @@ test "row diffing and terminal scrolling end up identical to a full repaint" {
         const want = try fresh.screen();
         defer gpa.free(want);
         try testing.expectEqualStrings(want, got);
+    }
+}
+
+test "scrolling in the editor sends a row, and ends up identical to a full repaint" {
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(gpa);
+    for (0..80) |i| {
+        var b: [160]u8 = undefined;
+        // Blank lines to match anywhere, and lines long enough to wrap, so a line can be several rows.
+        try doc.appendSlice(gpa, try std.fmt.bufPrint(&b, "line {d} **bold**\n\n", .{i}));
+        if (i % 3 == 0) try doc.appendSlice(gpa, "a long line that has to wrap onto another row of the editor and then onto another one too\n");
+    }
+    var r = try Rig.create(50, 15);
+    defer r.destroy();
+    _ = try r.app.openText("doc", doc.items, false);
+    try r.pump();
+    try r.keys("e");
+
+    const check = struct {
+        fn same(rig: *Rig) !void {
+            const shown = try rig.screen();
+            defer gpa.free(shown);
+            rig.app.screen.invalidate();
+            rig.term.fullReset();
+            rig.stream.nextSlice("\x1b[?1049h\x1b[?7l\x1b[?2027h");
+            try rig.pump();
+            const fresh = try rig.screen();
+            defer gpa.free(fresh);
+            try testing.expectEqualStrings(fresh, shown);
+        }
+    };
+
+    for (0..60) |_| {
+        try r.keys("\x1b[B");
+        try check.same(r);
+    }
+    // Once the cursor is at the bottom of the view, a line down is a scroll, and sends far less than
+    // the view.
+    try r.app.frame();
+    r.app.out.clearRetainingCapacity();
+    try r.app.event(.{ .key = .{ .code = input.Key.down } });
+    try r.app.frame();
+    r.stream.nextSlice(r.app.out.items);
+    try testing.expect(r.app.out.items.len < 400);
+    try testing.expect(std.mem.indexOf(u8, r.app.out.items, "S\x1b[r") != null);
+    r.app.out.clearRetainingCapacity();
+    try check.same(r);
+
+    for (0..40) |_| {
+        try r.keys("\x1b[A");
+        try check.same(r);
+    }
+    for ([_][]const u8{ "\x1b[6~", "\x1b[5~", "x", "\r", "\x7f", "\x1b[6~", "\x1b[6~", "\x1b[5~" }) |k| {
+        try r.keys(k);
+        try check.same(r);
     }
 }
 
@@ -841,7 +896,7 @@ test "the frame log says what happened, and nothing about the document" {
     defer gpa.free(path);
     defer _ = std.c.unlink(path.ptr);
 
-    const text = try @import("files.zig").read(gpa, path.ptr, 1024 * 1024);
+    const text = try @import("layout").files.read(gpa, path.ptr, 1024 * 1024);
     defer gpa.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "| key |") != null);
     try testing.expect(std.mem.indexOf(u8, text, "Layout") != null);
