@@ -55,6 +55,8 @@ pub const Images = struct {
     /// Columns text takes as a large heading, or null if it can't be drawn large.
     measure: *const fn (ctx: *anyopaque, text: []const u8, level: u32) ?u16,
     heading: *const fn (ctx: *anyopaque, text: []const u8, level: u32, cols: u16) ?Fit,
+    /// Render a Mermaid diagram to an image sized to fit, or null if it can't be drawn.
+    mermaid: *const fn (ctx: *anyopaque, src: []const u8, cols: u16, rows: u16) ?Fit,
 };
 
 pub const Options = struct {
@@ -657,6 +659,32 @@ const Builder = struct {
         self.need_gap = true;
     }
 
+    /// A ```mermaid block drawn as a diagram image, emitted as image rows like a lone image.
+    /// Returns false when it can't be rendered, so the caller shows the block as code instead.
+    fn mermaidBlock(self: *Builder, lines: []const []const u8, src: u32, ctx: *Ctx) !bool {
+        const im = self.opts.images orelse return false;
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.a);
+        for (lines, 0..) |l, k| {
+            if (k > 0) try buf.append(self.a, '\n');
+            try buf.appendSlice(self.a, l);
+        }
+        const room: u16 = @intCast(@min(ctx.width, 1000));
+        const f = im.mermaid(im.ctx, buf.items, room, self.opts.max_image_rows) orelse return false;
+        try self.gap(ctx);
+        var r: u16 = 0;
+        while (r < f.rows) : (r += 1) {
+            try self.begin(ctx, src);
+            self.row.image = f.image;
+            self.row.image_row = r;
+            self.row.image_rows = f.rows;
+            self.row.image_cols = f.cols;
+            try self.finish();
+        }
+        self.need_gap = true;
+        return true;
+    }
+
     /// The URL if the paragraph is exactly one image.
     fn loneImage(self: *Builder) ?[]const u8 {
         var id: u32 = 0;
@@ -1178,6 +1206,10 @@ const Builder = struct {
                     while (body.items.len > 0 and isBlank(body.items[body.items.len - 1])) body.items.len -= 1;
                 }
                 const info = std.mem.trim(u8, t[f.len..], " \t");
+                if (std.mem.eql(u8, info, "mermaid") and try self.mermaidBlock(body.items, self.off(line), ctx)) {
+                    i = @min(j + 1, lines.len);
+                    continue;
+                }
                 const ansi = std.mem.eql(u8, info, "ansi") or std.mem.eql(u8, info, "terminal");
                 try self.codeBlock(body.items, ansi, .{ .fg = Color.role(.code) }, ctx);
                 i = @min(j + 1, lines.len);
@@ -1718,6 +1750,9 @@ const FussyImages = struct {
     fn heading(_: *anyopaque, _: []const u8, _: u32, cols: u16) ?Images.Fit {
         return .{ .image = 2, .cols = cols, .rows = 3 };
     }
+    fn mermaid(_: *anyopaque, _: []const u8, cols: u16, _: u16) ?Images.Fit {
+        return if (cols >= 30) .{ .image = 3, .cols = 5, .rows = 2 } else null;
+    }
 };
 
 fn expectSameLayout(want: *const Layout, got: *const Layout) !void {
@@ -1754,10 +1789,11 @@ test "laying the same text out again matches starting over" {
         "- item [a](a.md)\n  more\n\n  - [ ] sub\n  - [x] done\n\n1. one\n2. two\n\n> quoted [q](q.md)\n> ![img](x.png)\n> | t |\n> |---|\n> | c |\n",
         "1. | a | b |\n   |---|---|\n   | c | d |\n\n   after\n2. | e |\n   |---|\n   | a very long cell that has to wrap at the narrow widths |\n\n> | q |\n> |---|\n> | r |\n\n- | s |\n  |---|\n  | t |\n",
         "```\ncode\ttabbed\n```\n\n```ansi\n\x1b[31mred\x1b[0m\n```\n\n    indented\n\n你好世界你好世界 and averyveryveryveryveryverylongword 👩‍💻👩‍💻\n",
+        "before\n\n```mermaid\nflowchart TD\n A --> B\n```\n\nafter\n",
     };
     const widths = [_]u16{ 40, 40, 12, 80, 29, 31, 8, 200, 29 };
     var token: u8 = 0;
-    const images = Images{ .ctx = &token, .fit = FussyImages.fit, .measure = FussyImages.measure, .heading = FussyImages.heading };
+    const images = Images{ .ctx = &token, .fit = FussyImages.fit, .measure = FussyImages.measure, .heading = FussyImages.heading, .mermaid = FussyImages.mermaid };
     for (docs) |doc| for ([_]?Images{ null, images }) |im| for ([_]bool{ false, true }) |marks| for ([_]bool{ false, true }) |tall| {
         var l = try layout(testing.allocator, doc, .{ .width = 40, .images = im, .link_marks = marks, .tall_headings = tall });
         defer l.deinit();

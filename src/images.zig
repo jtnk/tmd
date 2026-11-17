@@ -7,6 +7,7 @@ const files = @import("layout").files;
 const diacritics = @import("diacritics.zig").table;
 const md = @import("layout").md;
 const fetch = @import("fetch.zig");
+const merz = @import("merz");
 
 // vendor/decoders.c
 const c = struct {
@@ -124,6 +125,8 @@ pub const Store = struct {
     approved: std.StringHashMapUnmanaged(void) = .empty,
     /// Web images already fetched, keyed by absolute URL. Keys owned; the image's temp file is path.
     remote_index: std.StringHashMapUnmanaged(u32) = .empty,
+    /// Mermaid diagrams already rendered, keyed by block source. Keys owned; the PNG is a temp file.
+    mermaid_index: std.StringHashMapUnmanaged(u32) = .empty,
     /// Web images this layout wanted but couldn't load without approval, and one of their hosts.
     blocked: u32 = 0,
     blocked_host_buf: [255]u8 = undefined,
@@ -149,6 +152,8 @@ pub const Store = struct {
         self.approved.deinit(self.gpa);
         self.freeKeys(&self.remote_index);
         self.remote_index.deinit(self.gpa);
+        self.freeKeys(&self.mermaid_index);
+        self.mermaid_index.deinit(self.gpa);
         self.clearWidths();
         self.widths.deinit(self.gpa);
     }
@@ -181,13 +186,19 @@ pub const Store = struct {
     }
 
     pub fn source(self: *Store) md.Images {
-        return .{ .ctx = self, .fit = fitOpaque, .measure = measureOpaque, .heading = headingOpaque };
+        return .{ .ctx = self, .fit = fitOpaque, .measure = measureOpaque, .heading = headingOpaque, .mermaid = mermaidOpaque };
     }
 
     fn loadFont(self: *Store) bool {
+        if (self.mode == .off or !self.big_headings) return false;
+        return self.ensureFont();
+    }
+
+    /// Loads a sans font for the rasterisers (large headings and mermaid diagrams), once. Unlike
+    /// loadFont this ignores big_headings, since a diagram needs a font even when headings stay plain.
+    fn ensureFont(self: *Store) bool {
         if (self.font_tried) return self.font != null;
         self.font_tried = true;
-        if (self.mode == .off or !self.big_headings) return false;
         if (self.font_path) |p| {
             if (self.tryFont(p)) return true;
         }
@@ -322,10 +333,15 @@ pub const Store = struct {
     fn fit(self: *Store, url: []const u8, max_cols: u16, max_rows: u16) !?md.Images.Fit {
         if (self.mode == .off) return null;
         const idx = (try self.lookup(url)) orelse return null;
+        return self.fitIndex(idx, max_cols, max_rows);
+    }
+
+    /// Sizes an already-registered image to fit within max_cols by max_rows, never upscaling past
+    /// the image's own pixels.
+    fn fitIndex(self: *Store, idx: u32, max_cols: u16, max_rows: u16) md.Images.Fit {
         const im = self.items.items[idx];
         const cw = self.cell_w;
         const ch = self.cell_h;
-        // Never upscale past the image's own pixels.
         var cols: u32 = @min(max_cols, (im.w + cw - 1) / cw);
         var rows: u32 = @intCast((@as(u64, cols) * cw * im.h / im.w + ch - 1) / ch);
         const limit: u32 = @min(max_rows, diacritics.len - 1);
@@ -334,6 +350,50 @@ pub const Store = struct {
             cols = @intCast((@as(u64, rows) * ch * im.w / im.h + cw - 1) / cw);
         }
         return .{ .image = idx + 1, .cols = @intCast(@max(@min(cols, max_cols), 1)), .rows = @intCast(@max(rows, 1)) };
+    }
+
+    fn mermaidOpaque(ctx: *anyopaque, src: []const u8, cols: u16, rows: u16) ?md.Images.Fit {
+        const self: *Store = @ptrCast(@alignCast(ctx));
+        return self.mermaid(src, cols, rows) catch null;
+    }
+
+    fn mermaid(self: *Store, src: []const u8, max_cols: u16, max_rows: u16) !?md.Images.Fit {
+        if (self.mode == .off) return null;
+        const idx = (try self.renderMermaid(src)) orelse return null;
+        return self.fitIndex(idx, max_cols, max_rows);
+    }
+
+    /// Renders a mermaid block to a PNG in a temp file and registers it, once per distinct source.
+    /// Returns null when there's no usable font or the diagram can't be parsed or drawn.
+    fn renderMermaid(self: *Store, src: []const u8) !?u32 {
+        if (self.mermaid_index.get(src)) |i| return i;
+        if (!self.ensureFont()) return null;
+        const font = self.font orelse return null;
+        const png = merz.renderPng(self.gpa, src, font) catch return null;
+        defer self.gpa.free(png);
+        const path = try self.tempFile(png);
+        errdefer {
+            _ = std.c.unlink(path.ptr);
+            self.gpa.free(path);
+        }
+        const info = identify(self.gpa, path) orelse {
+            _ = std.c.unlink(path.ptr);
+            self.gpa.free(path);
+            return null;
+        };
+        const key = try self.gpa.dupe(u8, src);
+        errdefer self.gpa.free(key);
+        const n: u32 = @intCast(self.items.items.len);
+        try self.items.append(self.gpa, .{
+            .path = path,
+            .kind = info.kind,
+            .w = info.w,
+            .h = info.h,
+            .id = self.id_base + n + 1,
+            .tmp = true,
+        });
+        try self.mermaid_index.put(self.gpa, key, n);
+        return n;
     }
 
     fn lookup(self: *Store, url: []const u8) !?u32 {
@@ -430,6 +490,11 @@ pub const Store = struct {
     fn fetchRemote(self: *Store, abs: []const u8) ![:0]const u8 {
         const bytes = try fetch.getBytes(self.gpa, abs);
         defer self.gpa.free(bytes);
+        return self.tempFile(bytes);
+    }
+
+    /// Writes bytes to a fresh temp file (unlinked on exit) and returns its owned path.
+    fn tempFile(self: *Store, bytes: []const u8) ![:0]const u8 {
         const path = try std.fmt.allocPrintSentinel(self.gpa, "{s}/tmd-{d}-{d}", .{ tmpDir(), std.c.getpid(), self.tmp_seq }, 0);
         errdefer self.gpa.free(path);
         self.tmp_seq += 1;
@@ -754,6 +819,32 @@ fn shrink(g: std.mem.Allocator, px: []const u8, w: u32, h: u32, tw: u32, th: u32
 }
 
 const testing = std.testing;
+const build_options = @import("build_options");
+
+test "a mermaid block renders to a cached diagram image" {
+    const gpa = testing.allocator;
+    const path = try gpa.allocSentinel(u8, build_options.test_font.len, 0);
+    defer gpa.free(path);
+    @memcpy(path, build_options.test_font);
+    const font = try files.read(gpa, path.ptr, max_file);
+
+    var s = Store{ .gpa = gpa, .mode = .placeholder, .cell_w = 10, .cell_h = 20 };
+    s.font = font; // deinit frees it
+    s.font_tried = true;
+    defer s.deinit();
+
+    const src = "flowchart TD\n A[Start] --> B((End))";
+    const fit = (try s.mermaid(src, 80, 24)) orelse return error.NotRendered;
+    try testing.expect(fit.cols >= 1 and fit.rows >= 1);
+    try testing.expectEqual(@as(usize, 1), s.items.items.len);
+    try testing.expectEqual(Kind.png, s.items.items[0].kind);
+    try testing.expect(s.items.items[0].tmp);
+
+    // The same source is served from cache, not rendered again.
+    const again = (try s.mermaid(src, 40, 24)).?;
+    try testing.expectEqual(fit.image, again.image);
+    try testing.expectEqual(@as(usize, 1), s.items.items.len);
+}
 
 test "web images wait for the host to be approved" {
     var s = Store{ .gpa = testing.allocator, .mode = .placeholder };
