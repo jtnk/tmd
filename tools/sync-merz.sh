@@ -19,7 +19,7 @@
 set -eu
 
 MERZ="${1:?usage: tools/sync-merz.sh /path/to/merz-checkout}"
-DST="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
+DST="$(CDPATH='' cd "$(dirname "$0")/.." && pwd)"
 
 [ -f "$MERZ/src/raster.zig" ] || { echo "not a merz checkout: $MERZ" >&2; exit 1; }
 
