@@ -21,8 +21,8 @@ A PNG goes to the terminal as it is, without tmd decoding it:
 ## Mermaid diagrams
 
 A ` ```mermaid ` block is parsed, laid out and drawn as a diagram in place — no Node and no headless
-browser, just a small native renderer. It sits in the grid like any other image, so it scrolls and
-clips with the text.
+browser, just a small native renderer. Each one sits in the grid like any other image, so it scrolls
+and clips with the text.
 
 ```mermaid
 flowchart TD
@@ -33,8 +33,32 @@ flowchart TD
     C --> E((Done))
 ```
 
-Directions (`TD`, `LR`, `BT`, `RL`), the common node shapes, and solid, dotted and thick edges all
-work. A diagram type that isn't a flowchart, or a block that won't parse, falls back to showing as code.
+Left-to-right works too, and the common node shapes come through — stadium, diamond, subroutine,
+circle, and the `>asymmetric]` flag — alongside solid, dotted and thick edges:
+
+```mermaid
+flowchart LR
+    A[(Source)] -->|read| B([Parse])
+    B --> C{Valid?}
+    C -->|yes| D[[Transform]]
+    C -.->|no| E>Reject]
+    D ==> F((Output))
+```
+
+Cycles are fine: a back edge is drawn in full rather than tangling the ranks.
+
+```mermaid
+flowchart TD
+    PR[Open PR] --> CI{CI passes?}
+    CI -->|no| Fix[Push a fix]
+    Fix --> CI
+    CI -->|yes| Rev{Approved?}
+    Rev -->|no| Fix
+    Rev -->|yes| Merge((Merge))
+```
+
+Directions (`TD`, `LR`, `BT`, `RL`) and edge labels in both forms (`-->|x|` and `-- x -->`) all work.
+A diagram type that isn't a flowchart, or a block that won't parse, falls back to showing as code.
 
 ## Every palette
 
