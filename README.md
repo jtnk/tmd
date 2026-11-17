@@ -180,8 +180,8 @@ off-screen ones are evicted to stay inside a memory budget (8MB in Rex, which li
 Terminals with graphics but no placeholders get direct placements. Otherwise you see the alt text.
 
 **Mermaid diagrams are rendered natively.** A ` ```mermaid ` block is parsed, laid out and rasterized
-to a PNG by merz, a small native Zig renderer vendored into tmd, and then shown through the same
-image pipeline. There's no Node and no headless Chromium, the way `mmdc` needs:
+to a PNG by [merz](https://github.com/jtnk/merz), a small native Zig renderer vendored into tmd, and
+then shown through the same image pipeline. There's no Node and no headless Chromium, the way `mmdc` needs:
 merz parses the flowchart, ranks it into layers, and draws the shapes with signed-distance-field
 anti-aliasing and the heading font. Support covers flowcharts (`flowchart` and `graph`, all four
 directions, the common node shapes, and solid, dotted and thick edges); any other diagram type, or a

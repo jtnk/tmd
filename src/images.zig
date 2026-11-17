@@ -844,6 +844,23 @@ test "a mermaid block renders to a cached diagram image" {
     const again = (try s.mermaid(src, 40, 24)).?;
     try testing.expectEqual(fit.image, again.image);
     try testing.expectEqual(@as(usize, 1), s.items.items.len);
+
+    // Invalid UTF-8 in a label must not crash the rasteriser; it still renders.
+    const bad = "flowchart TD\n A[\xff\xfe bad\x80utf] --> B((\xc3end))";
+    const bf = (try s.mermaid(bad, 80, 24)) orelse return error.NotRendered;
+    try testing.expect(bf.cols >= 1 and bf.rows >= 1);
+
+    // A diagram type merz doesn't handle returns null, so the document shows it as code.
+    try testing.expectEqual(@as(?md.Images.Fit, null), try s.mermaid("sequenceDiagram\n A->>B: hi", 80, 24));
+    // A pathological fan-out is refused (too large), also falling back to code.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(gpa);
+    try big.appendSlice(gpa, "flowchart TD\n");
+    for (0..5000) |i| {
+        var line: [32]u8 = undefined;
+        try big.appendSlice(gpa, try std.fmt.bufPrint(&line, " ROOT --> N{d}\n", .{i}));
+    }
+    try testing.expectEqual(@as(?md.Images.Fit, null), try s.mermaid(big.items, 80, 24));
 }
 
 test "web images wait for the host to be approved" {

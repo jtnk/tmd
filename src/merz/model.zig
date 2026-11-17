@@ -21,6 +21,24 @@ pub const Shape = enum {
 
 pub const EdgeStyle = enum { solid, dotted, thick };
 
+/// Caps that keep a hostile or pathological diagram from blowing up layout and the canvas.
+/// Past these, building the graph fails with error.TooComplex and the caller shows the block
+/// as source instead of a diagram. Labels are truncated rather than rejected.
+pub const max_nodes = 400;
+pub const max_edges = 800;
+pub const max_label = 128;
+
+pub const Error = error{TooComplex};
+
+/// Truncate a label to max_label bytes, backing off to a UTF-8 boundary so a multi-byte
+/// character isn't split (the rasteriser tolerates it either way).
+fn clampLabel(label: []const u8) []const u8 {
+    if (label.len <= max_label) return label;
+    var end: usize = max_label;
+    while (end > 0 and label[end] & 0xC0 == 0x80) end -= 1;
+    return label[0..end];
+}
+
 pub const Node = struct {
     id: []const u8,
     label: []const u8,
@@ -74,16 +92,18 @@ pub const Graph = struct {
         if (self.index.get(id)) |idx| {
             if (explicit) {
                 const n = &self.nodes.items[idx];
+                const new_label = try self.gpa.dupe(u8, clampLabel(label));
                 self.gpa.free(n.label);
-                n.label = try self.gpa.dupe(u8, label);
+                n.label = new_label;
                 n.shape = shape;
             }
             return idx;
         }
+        if (self.nodes.items.len >= max_nodes) return Error.TooComplex;
         const idx: u32 = @intCast(self.nodes.items.len);
         const id_owned = try self.gpa.dupe(u8, id);
         errdefer self.gpa.free(id_owned);
-        const label_owned = try self.gpa.dupe(u8, label);
+        const label_owned = try self.gpa.dupe(u8, clampLabel(label));
         errdefer self.gpa.free(label_owned);
         try self.nodes.append(self.gpa, .{ .id = id_owned, .label = label_owned, .shape = shape });
         try self.index.put(self.gpa, id_owned, idx);
@@ -91,7 +111,8 @@ pub const Graph = struct {
     }
 
     pub fn addEdge(self: *Graph, from: u32, to: u32, label: []const u8, style: EdgeStyle, arrow: bool) !void {
-        const label_owned = if (label.len > 0) try self.gpa.dupe(u8, label) else "";
+        if (self.edges.items.len >= max_edges) return Error.TooComplex;
+        const label_owned = if (label.len > 0) try self.gpa.dupe(u8, clampLabel(label)) else "";
         try self.edges.append(self.gpa, .{
             .from = from,
             .to = to,

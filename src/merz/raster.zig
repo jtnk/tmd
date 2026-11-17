@@ -11,7 +11,11 @@ const ctt = @import("ctt");
 extern fn merz_encode_png(rgba: [*]const u8, w: c_int, h: c_int, out_len: *c_int) ?[*]u8;
 extern fn merz_free(p: ?*anyopaque) void;
 
-pub const Error = error{ BadFont, EncodeFailed } || std.mem.Allocator.Error;
+pub const Error = error{ BadFont, EncodeFailed, TooLarge } || std.mem.Allocator.Error;
+
+/// Upper bound on the diagram canvas (≈ 2500×1600). A diagram larger than this isn't readable in
+/// a terminal anyway, and the cap keeps a pathological graph from allocating a huge canvas.
+const max_pixels: usize = 4_000_000;
 
 const Color = struct {
     r: f32,
@@ -100,6 +104,7 @@ fn coverage(d: f32) f32 {
 pub fn renderPng(gpa: std.mem.Allocator, g: *model.Graph, bounds: layout.Bounds, font_bytes: []const u8) Error![]u8 {
     const w: usize = @intFromFloat(@ceil(bounds.w));
     const h: usize = @intFromFloat(@ceil(bounds.h));
+    if (w == 0 or h == 0 or w > 100_000 or h > 100_000 or w * h > max_pixels) return Error.TooLarge;
 
     var font: ctt.stbtt_fontinfo = undefined;
     const off = ctt.stbtt_GetFontOffsetForIndex(font_bytes.ptr, 0);
@@ -369,11 +374,36 @@ fn fillPolyColor(canvas: *Canvas, pts: []const P, color: Color) void {
 
 // ------------------------------------------------------------------ text (stb_truetype)
 
+/// Iterates codepoints, substituting U+FFFD for any invalid byte sequence. Labels come straight
+/// from the diagram source, which may not be valid UTF-8 (a hostile or mis-encoded document), so
+/// decoding must never fail the way std.unicode's iterator does.
+const Codepoints = struct {
+    bytes: []const u8,
+    i: usize = 0,
+    fn next(self: *Codepoints) ?u21 {
+        if (self.i >= self.bytes.len) return null;
+        const len = std.unicode.utf8ByteSequenceLength(self.bytes[self.i]) catch {
+            self.i += 1;
+            return 0xFFFD;
+        };
+        if (self.i + len > self.bytes.len) {
+            self.i += 1;
+            return 0xFFFD;
+        }
+        const cp = std.unicode.utf8Decode(self.bytes[self.i .. self.i + len]) catch {
+            self.i += 1;
+            return 0xFFFD;
+        };
+        self.i += len;
+        return cp;
+    }
+};
+
 fn labelWidth(font: *ctt.stbtt_fontinfo, text: []const u8, px: f32) i64 {
     const scale = ctt.stbtt_ScaleForPixelHeight(font, px);
     var total: f32 = 0;
-    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-    while (it.nextCodepoint()) |cp| {
+    var it = Codepoints{ .bytes = text };
+    while (it.next()) |cp| {
         var adv: c_int = 0;
         var lsb: c_int = 0;
         ctt.stbtt_GetCodepointHMetrics(font, @intCast(cp), &adv, &lsb);
@@ -397,8 +427,8 @@ fn drawText(canvas: *Canvas, font: *ctt.stbtt_fontinfo, text: []const u8, cx: f3
     var penx = cx - width / 2;
     const baseline = cy - text_h / 2 + asc;
 
-    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-    while (it.nextCodepoint()) |cp| {
+    var it = Codepoints{ .bytes = text };
+    while (it.next()) |cp| {
         var ix0: c_int = 0;
         var iy0: c_int = 0;
         var ix1: c_int = 0;

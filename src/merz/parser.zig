@@ -11,7 +11,7 @@ const Graph = model.Graph;
 const Shape = model.Shape;
 const EdgeStyle = model.EdgeStyle;
 
-pub const Error = error{ UnsupportedDiagram, EmptyInput } || std.mem.Allocator.Error;
+pub const Error = error{ UnsupportedDiagram, EmptyInput } || model.Error || std.mem.Allocator.Error;
 
 const ws = " \t\r\n";
 
