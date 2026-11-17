@@ -124,6 +124,7 @@ Press **?** in tmd for every key. The essentials:
 | `` Ctrl+` `` or `[` `]` | Next tab (`Shift` for previous), or previous and next |
 | `Ctrl+W` | Close tab (the last one quits), or click the `×` on a tab under the mouse |
 | `t` | Next color palette |
+| `I` | Load a web page's images, after approving their host |
 | `F12` | Performance HUD |
 | `F11` | Save the last 1,024 frames to a file, for a bug report |
 | Drag | Select text and copy it |
@@ -138,6 +139,7 @@ palette = nord          # system, dracula, nord, gruvbox, tokyo-night, catppucci
                         # solarized-dark, solarized-light, one-light
 width = 100             # widest text column
 images = on
+remote_images = ask     # ask (approve per host with I), off, or on
 big_headings = on
 heading_font = /path/to/Bold.ttf
 ```
@@ -193,6 +195,12 @@ uses the terminal's own scroll. Frames use synchronized output, so they never te
 A URL is requested with `Accept: text/markdown`, and if a site still answers with HTML, tmd tries where
 sites publish Markdown: `page.md`, then `page/index.html.md`. Only a URL you gave or a link you followed
 is ever requested. Pages open read-only, and their relative links stay on the web, never on your disk.
+
+**A web page's images wait for your say-so.** A document never reaches the network on its own, so the
+images of a page loaded over HTTP start as alt text, and the status row offers to load them. Press `I`
+to approve their host for the session; tmd then fetches each image with `curl`, caches it in a temp
+file, and shows it like any other. `remote_images = on` (or `--remote-images`) approves every host up
+front, and `off` never asks. The same gate covers a local file that points an image at an `http(s)` URL.
 
 **Documents can't reach the terminal.** Control characters are replaced before anything is written, so
 a hostile file can't move the cursor, set the title or write to the clipboard. Nor can a link run
@@ -274,7 +282,8 @@ atomic. `testdata/07-editing-playground.md` walks through it.
 - Over tmux, images need `set -g allow-passthrough on`.
 - The first view of a large JPEG blocks while it decodes. PNGs don't, as the terminal decodes them.
 - Loading a URL waits for the page, and needs `curl`.
-- Images in a page from the web aren't shown, and a document never makes a request by itself.
+- Images in a page from the web load only after you approve their host (press `I`); a document never
+  reaches the network on its own.
 - Find matches within a row, so a phrase split across a line wrap isn't found.
 - Copying uses the terminal's clipboard support (OSC 52), which some terminals leave off or ask about.
 - Footnotes and raw HTML show as plain text.

@@ -6,6 +6,7 @@ const std = @import("std");
 const files = @import("layout").files;
 const diacritics = @import("diacritics.zig").table;
 const md = @import("layout").md;
+const fetch = @import("fetch.zig");
 
 // vendor/decoders.c
 const c = struct {
@@ -44,6 +45,9 @@ fn headingRows(level: u32) u16 {
 
 pub const Mode = enum { off, placeholder, direct };
 
+/// Whether images hosted on the web load: never, always, or once the host is approved.
+pub const RemoteMode = enum { ask, off, on };
+
 const Kind = enum { png, raster, svg, text };
 
 const max_file = 64 * 1024 * 1024;
@@ -57,6 +61,8 @@ pub const Image = struct {
     id: u32,
     sent: bool = false,
     failed: bool = false,
+    /// A downloaded web image, kept in a temp file that is unlinked on exit.
+    tmp: bool = false,
     /// The frame this image was last on screen.
     used: u64 = 0,
     /// Pixel size of what was uploaded, which may be scaled from the source.
@@ -108,6 +114,22 @@ pub const Store = struct {
     font_tried: bool = false,
     /// The document came from the web, so its relative paths mean nothing on this disk.
     no_files: bool = false,
+    /// The page's URL, if any, so relative image paths resolve to absolute ones.
+    base_url: ?[]const u8 = null,
+    /// Whether web-hosted images load: ask (per host), off, or on.
+    remote_mode: RemoteMode = .ask,
+    /// Off in tests and the benchmark, so an image is never fetched in a child process there.
+    spawn: bool = true,
+    /// Hosts approved this session. Keys owned.
+    approved: std.StringHashMapUnmanaged(void) = .empty,
+    /// Web images already fetched, keyed by absolute URL. Keys owned; the image's temp file is path.
+    remote_index: std.StringHashMapUnmanaged(u32) = .empty,
+    /// Web images this layout wanted but couldn't load without approval, and one of their hosts.
+    blocked: u32 = 0,
+    blocked_host_buf: [255]u8 = undefined,
+    blocked_host_len: usize = 0,
+    /// Names the temp files downloaded images go in.
+    tmp_seq: u32 = 0,
     /// Heading widths in columns, by level and text. They don't depend on the window, so a resize
     /// doesn't pay for the font's kerning table again. no_width marks text the font can't draw.
     widths: std.StringHashMapUnmanaged(u32) = .empty,
@@ -116,14 +138,24 @@ pub const Store = struct {
 
     pub fn deinit(self: *Store) void {
         for (self.items.items) |i| {
+            if (i.tmp) _ = std.c.unlink(i.path.ptr);
             self.gpa.free(i.path);
             if (i.text.len > 0) self.gpa.free(i.text);
         }
         if (self.font) |f| self.gpa.free(f);
         self.items.deinit(self.gpa);
         self.index.deinit(self.gpa);
+        self.freeKeys(&self.approved);
+        self.approved.deinit(self.gpa);
+        self.freeKeys(&self.remote_index);
+        self.remote_index.deinit(self.gpa);
         self.clearWidths();
         self.widths.deinit(self.gpa);
+    }
+
+    fn freeKeys(self: *Store, map: anytype) void {
+        var it = map.keyIterator();
+        while (it.next()) |k| self.gpa.free(k.*);
     }
 
     fn clearWidths(self: *Store) void {
@@ -305,7 +337,12 @@ pub const Store = struct {
     }
 
     fn lookup(self: *Store, url: []const u8) !?u32 {
-        if (self.no_files or url.len == 0 or std.mem.indexOf(u8, url, "://") != null or std.mem.startsWith(u8, url, "data:")) return null;
+        if (url.len == 0 or std.mem.startsWith(u8, url, "data:")) return null;
+        if (try self.remoteUrl(url)) |abs| {
+            defer self.gpa.free(abs);
+            return self.lookupRemote(abs);
+        }
+        if (self.no_files) return null;
         const path = try self.resolve(url);
         errdefer self.gpa.free(path);
         if (self.index.get(path)) |i| {
@@ -326,6 +363,93 @@ pub const Store = struct {
         });
         try self.index.put(self.gpa, path, n);
         return n;
+    }
+
+    /// The absolute http(s) URL an image resolves to, or null when it's an ordinary local path.
+    /// Caller frees a returned slice.
+    fn remoteUrl(self: *Store, url: []const u8) !?[]u8 {
+        if (std.mem.indexOf(u8, url, "://") != null) {
+            return if (fetch.isUrl(url)) try self.gpa.dupe(u8, url) else null;
+        }
+        const base = self.base_url orelse return null;
+        const abs = try fetch.resolve(self.gpa, base, url);
+        if (!fetch.isUrl(abs)) {
+            self.gpa.free(abs);
+            return null;
+        }
+        return abs;
+    }
+
+    fn remoteAllowed(self: *const Store, host: []const u8) bool {
+        return switch (self.remote_mode) {
+            .off => false,
+            .on => true,
+            .ask => self.approved.contains(host),
+        };
+    }
+
+    /// An approved web image, fetched once and cached; otherwise null, with the want recorded so the
+    /// status row can offer to load it. The request is the user's, never the document's.
+    fn lookupRemote(self: *Store, abs: []const u8) !?u32 {
+        if (self.remote_index.get(abs)) |i| return i;
+        const host = fetch.hostOf(abs);
+        if (!self.spawn or !self.remoteAllowed(host)) {
+            self.blocked += 1;
+            if (self.blocked_host_len == 0) {
+                const n = @min(host.len, self.blocked_host_buf.len);
+                @memcpy(self.blocked_host_buf[0..n], host[0..n]);
+                self.blocked_host_len = n;
+            }
+            return null;
+        }
+        const path = self.fetchRemote(abs) catch return null;
+        errdefer {
+            _ = std.c.unlink(path.ptr);
+            self.gpa.free(path);
+        }
+        const info = identify(self.gpa, path) orelse {
+            _ = std.c.unlink(path.ptr);
+            self.gpa.free(path);
+            return null;
+        };
+        const key = try self.gpa.dupe(u8, abs);
+        errdefer self.gpa.free(key);
+        const n: u32 = @intCast(self.items.items.len);
+        try self.items.append(self.gpa, .{
+            .path = path,
+            .kind = info.kind,
+            .w = info.w,
+            .h = info.h,
+            .id = self.id_base + n + 1,
+            .tmp = true,
+        });
+        try self.remote_index.put(self.gpa, key, n);
+        return n;
+    }
+
+    fn fetchRemote(self: *Store, abs: []const u8) ![:0]const u8 {
+        const bytes = try fetch.getBytes(self.gpa, abs);
+        defer self.gpa.free(bytes);
+        const path = try std.fmt.allocPrintSentinel(self.gpa, "{s}/tmd-{d}-{d}", .{ tmpDir(), std.c.getpid(), self.tmp_seq }, 0);
+        errdefer self.gpa.free(path);
+        self.tmp_seq += 1;
+        // A leftover from a recycled pid would block the exclusive create.
+        _ = std.c.unlink(path.ptr);
+        try files.writeNew(path, bytes);
+        return path;
+    }
+
+    /// Approves loading web images from a host for the rest of the session.
+    pub fn approveHost(self: *Store, host: []const u8) !void {
+        if (host.len == 0 or self.approved.contains(host)) return;
+        const owned = try self.gpa.dupe(u8, host);
+        errdefer self.gpa.free(owned);
+        try self.approved.put(self.gpa, owned, {});
+    }
+
+    /// A host of an image this layout couldn't load without approval.
+    pub fn blockedHost(self: *const Store) []const u8 {
+        return self.blocked_host_buf[0..self.blocked_host_len];
     }
 
     fn resolve(self: *Store, url: []const u8) ![:0]const u8 {
@@ -533,6 +657,14 @@ pub const Store = struct {
     }
 };
 
+fn tmpDir() []const u8 {
+    if (std.c.getenv("TMPDIR")) |d| {
+        const s = std.mem.span(d);
+        if (s.len > 0) return std.mem.trimEnd(u8, s, "/");
+    }
+    return "/tmp";
+}
+
 fn codepoints(text: []const u8, out: []c_int) ?usize {
     var n: usize = 0;
     var it = (std.unicode.Utf8View.init(text) catch return null).iterator();
@@ -619,4 +751,49 @@ fn shrink(g: std.mem.Allocator, px: []const u8, w: u32, h: u32, tw: u32, th: u32
         }
     }
     return out;
+}
+
+const testing = std.testing;
+
+test "web images wait for the host to be approved" {
+    var s = Store{ .gpa = testing.allocator, .mode = .placeholder };
+    defer s.deinit();
+    s.base_url = "https://ex.com/docs/page.md";
+
+    // A relative image resolves against the page and so needs approval; it isn't fetched.
+    try testing.expectEqual(@as(?u32, null), try s.lookup("img/a.png"));
+    try testing.expectEqual(@as(u32, 1), s.blocked);
+    try testing.expectEqualStrings("ex.com", s.blockedHost());
+
+    // An absolute image on another host blocks too, and the first host is the one offered.
+    try testing.expectEqual(@as(?u32, null), try s.lookup("https://cdn.net/b.png"));
+    try testing.expectEqual(@as(u32, 2), s.blocked);
+    try testing.expectEqualStrings("ex.com", s.blockedHost());
+
+    // Approving a host is remembered, and a different host still isn't allowed.
+    try s.approveHost("ex.com");
+    try testing.expect(s.remoteAllowed("ex.com"));
+    try testing.expect(!s.remoteAllowed("cdn.net"));
+    try testing.expectEqual(@as(usize, 0), s.items.items.len);
+}
+
+test "off never loads web images, on always allows them" {
+    var s = Store{ .gpa = testing.allocator, .mode = .placeholder, .remote_mode = .off };
+    defer s.deinit();
+    s.base_url = "https://ex.com/a.md";
+    try testing.expect(!s.remoteAllowed("ex.com"));
+    s.remote_mode = .on;
+    try testing.expect(s.remoteAllowed("anywhere.example"));
+}
+
+test "a local path is not treated as remote" {
+    var s = Store{ .gpa = testing.allocator, .mode = .placeholder };
+    defer s.deinit();
+    // No base URL, so a relative path stays local (and simply finds no file here).
+    try testing.expectEqual(@as(?u32, null), try s.lookup("pic.png"));
+    try testing.expectEqual(@as(u32, 0), s.blocked);
+    // With a base URL, a root-relative path is still remote.
+    s.base_url = "https://ex.com/docs/page.md";
+    _ = try s.lookup("/logo.png");
+    try testing.expectEqual(@as(u32, 1), s.blocked);
 }

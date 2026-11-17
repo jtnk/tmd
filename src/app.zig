@@ -42,6 +42,8 @@ pub const Settings = struct {
     /// Draw h1 and h2 as large type, where the terminal can show images.
     big_headings: bool = true,
     heading_font: ?[:0]const u8 = null,
+    /// Whether images hosted on the web load: ask (approve per host), off, or on.
+    remote: images.RemoteMode = .ask,
     /// Editing is experimental, and off unless asked for.
     experimental_edit: bool = false,
 };
@@ -69,6 +71,9 @@ pub const Tab = struct {
     selection: ?Selection = null,
     /// Where the page came from, if it's from the web.
     url: ?[]u8 = null,
+    /// Web images this page wanted that need the host approved, and one of those hosts (owned).
+    blocked_images: u32 = 0,
+    blocked_host: []const u8 = "",
 
     /// Cells the tab bar gives the name, with the icon in front of a page from the web.
     fn nameCols(self: *const Tab) u32 {
@@ -80,6 +85,7 @@ pub const Tab = struct {
         self.ed.deinit();
         if (self.path) |p| self.gpa.free(p);
         if (self.url) |u| self.gpa.free(u);
+        if (self.blocked_host.len > 0) self.gpa.free(self.blocked_host);
         if (!std.mem.eql(u8, self.dir, ".")) self.gpa.free(self.dir);
     }
 };
@@ -306,6 +312,11 @@ pub const App = struct {
         }
         self.store.dir = t.dir;
         self.store.no_files = t.url != null;
+        self.store.base_url = t.url;
+        self.store.remote_mode = self.settings.remote;
+        self.store.spawn = self.spawn;
+        self.store.blocked = 0;
+        self.store.blocked_host_len = 0;
         self.store.heading_rgb = self.headingColor();
         const opts = md.Options{
             .width = w,
@@ -335,6 +346,11 @@ pub const App = struct {
         }
         if (src) |s| t.top = t.layout.?.rowForOffset(s);
         self.clampTop(t);
+        // Carry what this layout found, so the offer to load web images survives cached frames and
+        // tab switches, where the shared store's counters would be overwritten.
+        if (t.blocked_host.len > 0) self.gpa.free(t.blocked_host);
+        t.blocked_images = self.store.blocked;
+        t.blocked_host = if (self.store.blocked > 0) try self.gpa.dupe(u8, self.store.blockedHost()) else "";
         self.screen.invalidate();
     }
 
@@ -874,6 +890,7 @@ pub const App = struct {
             'u' => self.scrollBy(t, -@as(i32, @intCast(view / 2))),
             'g', Key.home => self.scrollTo(t, 0),
             'G', Key.end => self.scrollTo(t, self.maxTop(t)),
+            'I' => try self.loadRemote(t),
             Key.tab => self.focusLink(t, mods.shift),
             Key.enter => {
                 if (t.focus != 0) {
@@ -909,6 +926,16 @@ pub const App = struct {
 
     fn suspendRequest(self: *App) !void {
         self.want_suspend = true;
+    }
+
+    /// Approves the blocked web images' host for this session and lays the page out again, which
+    /// fetches them. The request is the user's: a document never reaches the network on its own.
+    fn loadRemote(self: *App, t: *Tab) !void {
+        if (t.blocked_images == 0) return;
+        try self.store.approveHost(t.blocked_host);
+        t.layout_gen = 0;
+        self.say("Loading images…", .{});
+        self.screen.invalidate();
     }
 
     fn scrollBy(self: *App, t: *Tab, by: i32) void {
@@ -1626,7 +1653,12 @@ pub const App = struct {
         } else try sc.text(st, t.name);
         if (t.ed.dirty()) try sc.text(st, " *");
         var right: []const u8 = "";
-        if (t.mode == .preview) {
+        if (t.mode == .preview and t.blocked_images > 0) {
+            right = std.fmt.bufPrint(&buf, "{d} web image{s}: I to load  ? help", .{
+                t.blocked_images,
+                if (t.blocked_images == 1) "" else "s",
+            }) catch "";
+        } else if (t.mode == .preview) {
             const l = &t.layout.?;
             const n: u32 = @intCast(l.rows.items.len);
             const max = n -| self.viewRows();
@@ -1650,12 +1682,13 @@ pub const App = struct {
         const p = self.config_path orelse return;
         var buf: [1024]u8 = undefined;
         const s = self.settings;
-        const text = std.fmt.bufPrint(&buf, "palette = {s}\nwidth = {d}\nopen = {s}\nimages = {s}\nbig_headings = {s}\n{s}{s}{s}{s}", .{
+        const text = std.fmt.bufPrint(&buf, "palette = {s}\nwidth = {d}\nopen = {s}\nimages = {s}\nbig_headings = {s}\nremote_images = {s}\n{s}{s}{s}{s}", .{
             theme.palettes[s.palette].name,
             s.max_width,
             @tagName(s.open_in),
             if (s.images) "on" else "off",
             if (s.big_headings) "on" else "off",
+            @tagName(s.remote),
             if (s.heading_font != null) "heading_font = " else "",
             if (s.heading_font) |f| f else "",
             if (s.heading_font != null) "\n" else "",

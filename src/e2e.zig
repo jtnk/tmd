@@ -678,6 +678,26 @@ test "a page from the web can't reach this disk" {
     try testing.expect(std.mem.endsWith(u8, r.app.opened.items, "a.example/docs/testdata/01-text.md"));
 }
 
+test "a web page offers to load its images, and I approves the host" {
+    var r = try Rig.create(80, 20);
+    defer r.destroy();
+    r.app.store.mode = .placeholder;
+    const page = try r.app.openText("page.md", "![pic](images/gradient.png)\n\nbody text\n", true);
+    page.url = try gpa.dupe(u8, "https://a.example/docs/page.md");
+    try r.pump();
+
+    // The image didn't load on its own, and the footer offers to.
+    try testing.expectEqual(@as(u32, 0), page.layout.?.rows.items[0].image);
+    try testing.expectEqual(@as(u32, 1), page.blocked_images);
+    try testing.expectEqualStrings("a.example", page.blocked_host);
+    try r.expectShows("web image");
+
+    // I approves the host for the session. (The fetch itself is a child process, which tests don't
+    // run, so the image stays offered here; what matters is that the host is now approved.)
+    try r.keys("I");
+    try testing.expect(r.app.store.approved.contains("a.example"));
+}
+
 test "a page from the web has an icon, and shows its address in the footer" {
     var r = try Rig.create(80, 20);
     defer r.destroy();

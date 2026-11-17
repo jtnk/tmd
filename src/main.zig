@@ -25,6 +25,7 @@ const usage =
     \\      --palette NAME  system, dracula, nord, gruvbox, tokyo-night, catppuccin,
     \\                      solarized-dark, solarized-light or one-light
     \\      --no-images     Show alt text instead of images
+    \\      --remote-images  Load web-hosted images without asking (default: ask per host)
     \\      --plain-headings  Draw headings as text, not large type
     \\      --bench FILE    Run the frame benchmark, exit 1 if it misses 60 fps
     \\  -v, --version       Print the version
@@ -105,6 +106,10 @@ fn run(init: std.process.Init.Minimal) !void {
             print = true;
         } else if (eq(a, "--no-images")) {
             settings.images = false;
+        } else if (eq(a, "--remote-images")) {
+            settings.remote = .on;
+        } else if (eq(a, "--no-remote-images")) {
+            settings.remote = .off;
         } else if (eq(a, "--plain-headings")) {
             settings.big_headings = false;
         } else if (eq(a, "-w") or eq(a, "--width")) {
@@ -322,6 +327,8 @@ fn loadConfig(gpa: std.mem.Allocator, path: [:0]const u8, s: *Settings) void {
             if (eq(val, "editor") or eq(val, "edit")) s.open_in = .edit;
         } else if (eq(key, "images")) {
             s.images = !eq(val, "off");
+        } else if (eq(key, "remote_images")) {
+            s.remote = if (eq(val, "on")) .on else if (eq(val, "off")) .off else .ask;
         } else if (eq(key, "big_headings")) {
             s.big_headings = !eq(val, "off");
         } else if (eq(key, "experimental_edit")) {

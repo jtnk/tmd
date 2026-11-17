@@ -18,6 +18,14 @@ pub fn isUrl(s: []const u8) bool {
     return std.ascii.startsWithIgnoreCase(s, "https://") or std.ascii.startsWithIgnoreCase(s, "http://");
 }
 
+/// The host of a URL: what sits between :// and the next /, ? or #. Used to approve web images
+/// per host, and to name the host in the offer to load them.
+pub fn hostOf(url: []const u8) []const u8 {
+    const after = (std.mem.indexOf(u8, url, "://") orelse return url) + 3;
+    const rest = url[after..];
+    return rest[0 .. std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len];
+}
+
 /// What a failed load should say, or null if the error isn't about loading.
 pub fn describe(e: anyerror) ?[]const u8 {
     return switch (e) {
@@ -166,6 +174,16 @@ pub fn get(gpa: std.mem.Allocator, url: []const u8) Error!Page {
     return if (got_html) error.NotMarkdown else error.FetchFailed;
 }
 
+/// Fetches the bytes at an http(s) URL, for a web image the user approved loading. An HTML reply
+/// (an error page, or a redirect to one) is rejected, so it shows as alt text, not a broken image.
+pub fn getBytes(gpa: std.mem.Allocator, url: []const u8) Error![]u8 {
+    const r = try request(gpa, url);
+    gpa.free(r.meta);
+    errdefer gpa.free(r.body);
+    if (looksLikeHtml(r.body)) return error.NotMarkdown;
+    return r.body;
+}
+
 /// The absolute URL of a link in a page at base.
 pub fn resolve(gpa: std.mem.Allocator, base: []const u8, rel: []const u8) ![]u8 {
     if (isUrl(rel)) return gpa.dupe(u8, rel);
@@ -255,4 +273,12 @@ test "tabs are named after the page, or the site" {
     try testing.expectEqualStrings("page.md", nameOf("https://a.io/docs/page.md?x=1"));
     try testing.expectEqualStrings("docs", nameOf("https://a.io/docs/"));
     try testing.expectEqualStrings("a.io", nameOf("https://a.io/"));
+}
+
+test "the host is what approval is keyed on" {
+    try testing.expectEqualStrings("a.io", hostOf("https://a.io/docs/page.md"));
+    try testing.expectEqualStrings("a.io:8080", hostOf("http://a.io:8080/x"));
+    try testing.expectEqualStrings("a.io", hostOf("https://a.io"));
+    try testing.expectEqualStrings("a.io", hostOf("https://a.io?q=1"));
+    try testing.expectEqualStrings("cdn.b.io", hostOf("https://cdn.b.io/img/a.png#x"));
 }
