@@ -49,7 +49,7 @@ Then press `t` until you reach it, or set `palette = mine` in your config.
 
 | # | Page | What it exercises |
 |--:|---|---|
-| ★ | [Gallery](09-gallery.md) | Everything at once: images, palettes, terminal output, tables |
+| ★ | [Gallery](09-gallery.md) | Everything at once: images, Mermaid diagrams, palettes, terminal output, tables |
 | 1 | [Text and inline formatting](01-text.md) | Headings 1–6, bold, italic, code, links in running text, long paragraphs |
 | 2 | [Tables](02-tables.md) | Narrow, wide and many-column tables; alignment; formatting and escaped pipes in cells |
 | 3 | [Lists and quotes](03-lists-and-quotes.md) | Bullets, numbers, nesting, task lists, block quotes |
@@ -74,4 +74,5 @@ What to look for on each page:
 - [ ] **t** restyles every open tab live
 - [ ] Resizing the window keeps the top line in place, mid-document
 - [ ] Page 8 shows images in kitty and Ghostty, and they scroll and clip like text
+- [ ] The gallery's `mermaid` block draws as a flowchart, not code, in terminals with graphics
 - [ ] The HUD's graph stays low while scrolling

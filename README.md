@@ -64,6 +64,7 @@ Terminal has no graphics, so it gets double-height titles and alt text.
 |---|---|
 | **Large headings** | Terminals have one font size, so h1 and h2 are drawn as pixels, and scroll like text |
 | **Images** | PNG, JPEG, GIF, BMP and SVG, in place in the document, over the kitty graphics protocol |
+| **Mermaid diagrams** | A ` ```mermaid ` flowchart is drawn in place, rendered natively — no Node and no headless browser |
 | **Tables that stay straight** | Widths come from Ghostty's own tables, so emoji and CJK can't push a border out |
 | **Terminal output** | A block marked `ansi` keeps the colors of a pasted session, and nothing else gets through |
 | **Tabs and links** | Links to Markdown open as tabs, with `#anchor` jumps; web pages and documents open outside tmd, and are marked `↗` |
@@ -178,6 +179,14 @@ JPEG, GIF and BMP are decoded with stb_image and SVG with nanosvg. Images upload
 off-screen ones are evicted to stay inside a memory budget (8MB in Rex, which limits each block).
 Terminals with graphics but no placeholders get direct placements. Otherwise you see the alt text.
 
+**Mermaid diagrams are rendered natively.** A ` ```mermaid ` block is parsed, laid out and rasterized
+to a PNG by merz, a small native Zig renderer vendored into tmd, and then shown through the same
+image pipeline. There's no Node and no headless Chromium, the way `mmdc` needs:
+merz parses the flowchart, ranks it into layers, and draws the shapes with signed-distance-field
+anti-aliasing and the heading font. Support covers flowcharts (`flowchart` and `graph`, all four
+directions, the common node shapes, and solid, dotted and thick edges); any other diagram type, or a
+block that won't parse, falls back to showing as code. With graphics off, the block stays code too.
+
 **Large headings are pixels.** Terminals have one font size, and the protocol that would change that
 (OSC 66) is rendered only by kitty. So h1 and h2 are drawn with stb_truetype and shown as images, three
 and two rows tall, wrapping as needed. A heading stays ordinary text when graphics are off, no font is
@@ -286,6 +295,7 @@ atomic. `testdata/07-editing-playground.md` walks through it.
   reaches the network on its own.
 - Find matches within a row, so a phrase split across a line wrap isn't found.
 - Copying uses the terminal's clipboard support (OSC 52), which some terminals leave off or ask about.
+- Mermaid renders flowcharts (`flowchart` and `graph`); other diagram types show as code.
 - Footnotes and raw HTML show as plain text.
 
 ## License

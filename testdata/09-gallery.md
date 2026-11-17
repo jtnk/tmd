@@ -18,6 +18,24 @@ A PNG goes to the terminal as it is, without tmd decoding it:
 
 ![A gradient](images/gradient.png)
 
+## Mermaid diagrams
+
+A ` ```mermaid ` block is parsed, laid out and drawn as a diagram in place — no Node and no headless
+browser, just a small native renderer. It sits in the grid like any other image, so it scrolls and
+clips with the text.
+
+```mermaid
+flowchart TD
+    A[Start] --> B{Is it working?}
+    B -->|Yes| C[Ship it]
+    B -->|No| D[Debug]
+    D --> B
+    C --> E((Done))
+```
+
+Directions (`TD`, `LR`, `BT`, `RL`), the common node shapes, and solid, dotted and thick edges all
+work. A diagram type that isn't a flowchart, or a block that won't parse, falls back to showing as code.
+
 ## Every palette
 
 Press `t` to walk through these. Your choice is saved, and `system` keeps your terminal's own colors.
