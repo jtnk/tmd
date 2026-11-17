@@ -91,7 +91,7 @@ upload 100% [32mdone[0m
 
 ## Tables that stay straight
 
-Widths come from Ghostty's own tables, so the borders line up around emoji, CJK and joined sequences.
+Widths come from Ghostty's own tables, so the borders line up around wide glyphs like emoji and CJK.
 
 | Thing | Example | Cells | Aligned |
 |:---|:---:|---:|:---:|
@@ -99,9 +99,11 @@ Widths come from Ghostty's own tables, so the borders line up around emoji, CJK 
 | Chinese | 你好世界 | 8 | ✅ |
 | Japanese | こんにちは | 10 | ✅ |
 | Rocket | 🚀 | 2 | ✅ |
-| Joined emoji | 👩‍💻 | 2 | ✅ |
-| Flag | 🏳️‍🌈 | 2 | ✅ |
 | Accent | café | 4 | ✅ |
+
+Zero-width-joiner emoji like 👩‍💻 and 🏳️‍🌈 are the exception: their width isn't agreed on, so a
+terminal can draw them narrower than their two cells and nudge a border. That's the font's call, not
+the layout's — the width tmd lays out to is fixed.
 
 Long cells wrap instead of pushing the table off the screen:
 
