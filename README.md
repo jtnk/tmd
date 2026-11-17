@@ -295,7 +295,7 @@ atomic. `testdata/07-editing-playground.md` walks through it.
   reaches the network on its own.
 - Find matches within a row, so a phrase split across a line wrap isn't found.
 - Copying uses the terminal's clipboard support (OSC 52), which some terminals leave off or ask about.
-- Zero-width-joiner emoji (e.g. 👩‍💻) can render narrower than their reserved width and nudge a table border; their width is the terminal font's call, not the layout's.
+- Zero-width-joiner emoji (e.g. 👩‍💻) can render narrower than their reserved width and nudge a table border; their width is the terminal font's call, not the layout's ([#6](https://github.com/jtnk/tmd/issues/6)).
 - Mermaid renders flowcharts (`flowchart` and `graph`); other diagram types show as code.
 - Footnotes and raw HTML show as plain text.
 
