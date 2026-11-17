@@ -163,9 +163,11 @@ The polygon rasterization is heavily based on stb_truetype rasterizer
 by Sean Barrett - http://nothings.org/
 ```
 
-## stb_image and stb_truetype
+## stb_image, stb_truetype, stb_image_write
 
-Image decoding and heading text, in `vendor/`. tmd uses them under the MIT alternative.
+Image decoding, heading text, and (via the vendored merz Mermaid renderer in
+`src/merz/`) diagram text rasterization and PNG encoding, in `vendor/`. All by
+Sean Barrett under the same terms; tmd uses them under the MIT alternative.
 
 ```
 This software is available under 2 licenses -- choose whichever you prefer.

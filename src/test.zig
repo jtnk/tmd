@@ -13,6 +13,7 @@ test {
 test {
     _ = @import("app.zig");
     _ = @import("term.zig");
+    _ = @import("merz_smoke.zig");
 }
 test {
     _ = @import("e2e.zig");

@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     // so it alone is built for speed: that costs about 6KB, where the whole binary would cost 225KB.
     const layout_optimize: std.builtin.OptimizeMode = if (optimize == .small) .fast else optimize;
     exe_mod.addImport("layout", module(b, "src/layout.zig", target, layout_optimize, optimize, strip));
+    exe_mod.addImport("merz", merzModule(b, target, optimize, strip));
     const exe = b.addExecutable(.{ .name = "tmd", .root_module = exe_mod });
     b.installArtifact(exe);
 
@@ -30,6 +31,7 @@ pub fn build(b: *std.Build) void {
     const test_mod = module(b, "src/test.zig", target, .debug, .debug, false);
     addDecoders(b, test_mod);
     test_mod.addImport("layout", module(b, "src/layout.zig", target, .debug, .debug, false));
+    test_mod.addImport("merz", merzModule(b, target, .debug, false));
     const test_options = b.addOptions();
     test_options.addOption([]const u8, "version", version);
     // A font for heading tests, so they don't depend on what this machine has installed.
@@ -49,6 +51,36 @@ pub fn build(b: *std.Build) void {
     const run_layout_tests = b.addRunArtifact(b.addTest(.{ .root_module = layout_test_mod }));
     run_layout_tests.has_side_effects = true;
     test_step.dependOn(&run_layout_tests.step);
+}
+
+/// The vendored merz Mermaid renderer: its own module with stb_truetype
+/// (translated to Zig) and the stb C shim, kept clear of Ghostty.
+fn merzModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    strip: bool,
+) *std.Build.Module {
+    const m = b.createModule(.{
+        .root_source_file = b.path("src/merz/merz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = strip,
+        .link_libc = true,
+    });
+    const translate = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/stbtt_decl.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translate.addIncludePath(b.path("vendor"));
+    m.addImport("ctt", translate.createModule());
+    m.addIncludePath(b.path("vendor"));
+    m.addCSourceFile(.{
+        .file = b.path("vendor/stb.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
+    return m;
 }
 
 fn module(
