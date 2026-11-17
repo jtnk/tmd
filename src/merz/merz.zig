@@ -1,9 +1,14 @@
-//! Vendored from the merz project (../merz): a native Mermaid flowchart
-//! renderer. tmd uses it to turn a ```mermaid code block into a PNG, passing in
-//! its own font bytes. Keep src/merz/*.zig and vendor/stb.c, stbtt_decl.h,
-//! stb_image_write.h in sync with upstream merz; local changes: stripped unit
-//! tests, and it builds against tmd's existing vendor/stb_truetype.h (v1.26)
-//! rather than merz's own copy.
+//! Vendored from merz (https://github.com/jtnk/merz), a native Mermaid
+//! flowchart renderer. tmd uses it to turn a ```mermaid code block into a PNG,
+//! passing in its own font bytes.
+//!
+//! Pinned to merz commit 3908ae0. Refresh with `tools/sync-merz.sh <merz-checkout>`,
+//! which copies src/merz/{model,parser,layout,raster}.zig and the vendor/ stb
+//! glue. Deliberate local deltas: raster.zig's unit tests are dropped (they
+//! embed merz's own font, which tmd supplies at the call site), and the whole
+//! thing builds against tmd's shared vendor/stb_truetype.h (v1.26) rather than
+//! merz's newer copy. This facade and vendor/stb_truetype.h are tmd's own; the
+//! sync script never touches them.
 const std = @import("std");
 
 pub const model = @import("model.zig");

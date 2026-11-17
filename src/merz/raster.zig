@@ -13,7 +13,7 @@ extern fn merz_free(p: ?*anyopaque) void;
 
 pub const Error = error{ BadFont, EncodeFailed, TooLarge } || std.mem.Allocator.Error;
 
-/// Upper bound on the diagram canvas (≈ 2500×1600). A diagram larger than this isn't readable in
+/// Upper bound on the diagram canvas (~ 2500x1600). A diagram larger than this isn't readable in
 /// a terminal anyway, and the cap keeps a pathological graph from allocating a huge canvas.
 const max_pixels: usize = 4_000_000;
 
@@ -516,5 +516,3 @@ fn sdPolygon(pts: []const P, px: f32, py: f32) f32 {
     return if (inside) -d else d;
 }
 
-// Unit tests live in the upstream merz repo; the raster test needs merz's own
-// embedded font, which tmd supplies at the call site instead.
